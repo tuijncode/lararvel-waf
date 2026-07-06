@@ -1,0 +1,35 @@
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create(config('waf.table_name', 'waf_logs'), function (Blueprint $table) {
+            $table->id();
+            $table->string('ip_address')->index();
+            $table->string('method', 10)->nullable();
+            $table->text('url');
+            $table->string('user_agent', 500)->nullable();
+            $table->text('type');
+            $table->string('category', 30)->index();
+            $table->string('rule_ids')->nullable();
+            $table->text('payload')->nullable();
+            $table->string('threat_level', 20)->default('notice')->index();
+            $table->unsignedSmallInteger('anomaly_score')->default(0);
+            $table->unsignedTinyInteger('confidence_score')->default(0)->index();
+            $table->string('confidence_label', 20)->default('none');
+            $table->string('action_taken', 20)->default('logged');
+            $table->unsignedBigInteger('user_id')->nullable()->index();
+            $table->timestamps();
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists(config('waf.table_name', 'waf_logs'));
+    }
+};
