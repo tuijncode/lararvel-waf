@@ -4,6 +4,22 @@ All notable changes to `tuijncode/laravel-waf` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-07-08
+
+### Added
+
+- Decisive signatures: a `decisive` flag on custom patterns forces confidence to
+  100 on a single match, so unambiguous probes are blocked outright regardless of
+  `block_confidence`. The bundled `.env`, `.git`, `.svn`, credential-directory,
+  SSH private key and server-config probes are now decisive.
+
+### Fixed
+
+- A bare `.env` / `.git/config` probe from an ordinary client no longer slips
+  through in blocking mode. Previously a lone file-probe hit scored 37 (below the
+  default block threshold of 60), because a single signature could never reach the
+  threshold on the anomaly math alone.
+
 ## [1.0.0] - 2026-07-06
 
 ### Added

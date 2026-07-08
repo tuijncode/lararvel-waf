@@ -330,6 +330,7 @@ class WafInspector
                 targets: $rich ? ($definition['targets'] ?? $everySurface) : $everySurface,
                 regex: $regex,
                 paranoia: $rich ? (int) ($definition['paranoia'] ?? $defaultParanoia) : $defaultParanoia,
+                decisive: $rich && (bool) ($definition['decisive'] ?? false),
             );
         }
 

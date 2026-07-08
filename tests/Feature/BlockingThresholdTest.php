@@ -23,6 +23,18 @@ it('logs but lets through a finding below the block threshold', function () {
     expect(DB::table('waf_logs')->count())->toBe(1);
 });
 
+it('blocks a decisive probe outright, below the default threshold', function () {
+    config()->set('waf.block_confidence', 60);
+
+    // A bare `.env` fetch from an ordinary client scores 37 on the anomaly math
+    // alone — but the rule is decisive, so it is forced to 100 and blocked.
+    $response = $this->get('/.env')->assertForbidden();
+
+    $log = DB::table('waf_logs')->sole();
+    expect($log->confidence_score)->toBe(100)
+        ->and($log->action_taken)->toBe('blocked');
+});
+
 it('never blocks in detection mode', function () {
     config()->set('waf.mode', 'detection');
     config()->set('waf.block_confidence', 0);

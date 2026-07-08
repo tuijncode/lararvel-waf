@@ -14,6 +14,9 @@
 | severity : critical | error | warning | notice   (default: WAF_CUSTOM_SEVERITY)
 | targets  : which request parts to scan — query, body, path, headers, cookie
 |            (default: all of them)
+| decisive : true marks a hit as a certain attack (e.g. a bare `.env` probe).
+|            One match forces confidence to 100, so blocking mode blocks it
+|            outright — no second signal or lowered block_confidence needed.
 |
 | False-positive discipline:
 |   - Secret/token formats are specific enough to scan everywhere.
@@ -38,6 +41,11 @@ $w = fn (string $label, array $targets = []) => array_filter([
 ]);
 $n = fn (string $label, array $targets = []) => array_filter([
     'label' => $label, 'severity' => 'notice', 'targets' => $targets,
+]);
+// Decisive: a certain attack. Critical severity + forces confidence to 100 so a
+// single hit blocks outright (see the `decisive` note in the header above).
+$d = fn (string $label, array $targets = []) => array_filter([
+    'label' => $label, 'severity' => 'critical', 'targets' => $targets, 'decisive' => true,
 ]);
 
 return [
@@ -84,12 +92,12 @@ return [
         // ---------------------------------------------------------------
         // Sensitive file & directory access
         // ---------------------------------------------------------------
-        '/\.env(?:\.[a-z]+)?(?:$|[?&\/])/i' => $e('Environment File Access', ['query', 'path']),
-        '/\.git(?:\/(?:config|HEAD|index)|\/|\\\\|$)/i' => $e('Git Directory Access', ['query', 'path']),
-        '/\.svn(?:\/|\\\\|$)/i' => $e('SVN Directory Access', ['query', 'path']),
-        '/\.(?:ssh|aws|azure|kube|docker)(?:\/|\\\\)/i' => $e('Credential Directory Access', ['query', 'path']),
-        '/\b(?:id_rsa|id_dsa|id_ecdsa|id_ed25519)\b/i' => $e('SSH Private Key Access', ['query', 'path']),
-        '/\.(?:htpasswd|htaccess)\b|(?:^|\/)web\.config\b/i' => $e('Server Config Access', ['query', 'path']),
+        '/\.env(?:\.[a-z]+)?(?:$|[?&\/])/i' => $d('Environment File Access', ['query', 'path']),
+        '/\.git(?:\/(?:config|HEAD|index)|\/|\\\\|$)/i' => $d('Git Directory Access', ['query', 'path']),
+        '/\.svn(?:\/|\\\\|$)/i' => $d('SVN Directory Access', ['query', 'path']),
+        '/\.(?:ssh|aws|azure|kube|docker)(?:\/|\\\\)/i' => $d('Credential Directory Access', ['query', 'path']),
+        '/\b(?:id_rsa|id_dsa|id_ecdsa|id_ed25519)\b/i' => $d('SSH Private Key Access', ['query', 'path']),
+        '/\.(?:htpasswd|htaccess)\b|(?:^|\/)web\.config\b/i' => $d('Server Config Access', ['query', 'path']),
         '/\b(?:wp-config|configuration|settings|local|database)\.(?:php|ya?ml|ini)\b/i' => $e('App Config File Access', ['query', 'path']),
         '/\b(?:composer|package|yarn)\.(?:json|lock)\b/i' => $w('Dependency Manifest Access', ['query', 'path']),
         '/\.(?:bak|old|orig|save|swp|swo|sql|tar|gz|tgz|zip|rar|7z|dump)(?:$|[?&])/i' => $w('Backup / Archive File Probe', ['query', 'path']),

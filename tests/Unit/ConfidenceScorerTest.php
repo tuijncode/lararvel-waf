@@ -5,9 +5,9 @@ use Tuijncode\LaravelWaf\Services\ConfidenceScorer;
 
 beforeEach(fn () => $this->scorer = new ConfidenceScorer);
 
-function match_(string $severity, string $context = 'query'): SignatureMatch
+function match_(string $severity, string $context = 'query', bool $decisive = false): SignatureMatch
 {
-    return new SignatureMatch('id', 'cat', 'name', 'desc', $severity, $context, 'x');
+    return new SignatureMatch('id', 'cat', 'name', 'desc', $severity, $context, 'x', $decisive);
 }
 
 it('returns a clean zero for no signals', function () {
@@ -48,6 +48,17 @@ it('never leaves the 0-100 range', function () {
     $result = $this->scorer->calculate($huge, isScanner: true, isBot: true, isDdos: true);
 
     expect($result['score'])->toBeLessThanOrEqual(100)->toBeGreaterThanOrEqual(0);
+});
+
+it('forces full confidence for a decisive match', function () {
+    // On its own an error-severity path hit scores 37 — below block_confidence.
+    $normal = $this->scorer->calculate([match_('error', 'path')]);
+    expect($normal['score'])->toBe(37);
+
+    // The same hit marked decisive is treated as a certainty.
+    $decisive = $this->scorer->calculate([match_('error', 'path', decisive: true)]);
+    expect($decisive['score'])->toBe(100)
+        ->and($decisive['label'])->toBe('critical');
 });
 
 it('maps scores onto labels', function () {

@@ -11,6 +11,7 @@ final class Signature
 {
     /**
      * @param  array<int, string>  $targets  surfaces to inspect (query, body, path, headers, cookie)
+     * @param  bool  $decisive  a hit is a certain attack — forces full confidence and a block
      */
     public function __construct(
         public readonly string $id,
@@ -21,6 +22,7 @@ final class Signature
         public readonly array $targets,
         public readonly string $regex,
         public readonly int $paranoia = 1,
+        public readonly bool $decisive = false,
     ) {}
 
     /**
@@ -54,6 +56,7 @@ final class Signature
             severity: $this->severity,
             context: $context,
             matched: $matched,
+            decisive: $this->decisive,
         );
     }
 }

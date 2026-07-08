@@ -16,6 +16,7 @@ final class SignatureMatch
         public readonly string $severity,
         public readonly string $context,
         public readonly string $matched,
+        public readonly bool $decisive = false,
     ) {}
 
     public function anomalyScore(): int

@@ -64,6 +64,16 @@ class ConfidenceScorer
             $score += 25;
         }
 
+        // Decisive signatures (e.g. a bare `.env` or `.git/config` probe) have no
+        // legitimate use, so a single hit is treated as a certainty: full score,
+        // which guarantees a block in blocking mode regardless of block_confidence.
+        foreach ($matches as $match) {
+            if ($match->decisive) {
+                $score = 100;
+                break;
+            }
+        }
+
         $score = max(0, min(100, $score));
 
         return [
