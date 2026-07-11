@@ -106,11 +106,19 @@ class ExclusionRuleService
      */
     private function active(): Collection
     {
-        return Cache::remember(self::CACHE_BUCKET, now()->addMinutes(10), function (): Collection {
+        // Cache plain arrays, never objects. Laravel's cache stores unserialize
+        // with an `allowed_classes` restriction (cache.serializable_classes,
+        // which defaults to false in Laravel 12+), so a cached Collection or
+        // stdClass would come back as __PHP_Incomplete_Class and make this
+        // method throw — silently disabling the WAF. Rebuild the objects on read.
+        $rows = Cache::remember(self::CACHE_BUCKET, now()->addMinutes(10), function (): array {
             return $this->installed()
                 ? DB::table(self::TABLE)->where('is_active', true)->get()
-                : collect();
+                    ->map(static fn (object $row): array => (array) $row)->all()
+                : [];
         });
+
+        return collect($rows)->map(static fn (array $row): object => (object) $row);
     }
 
     private function installed(): bool

@@ -4,6 +4,27 @@ All notable changes to `tuijncode/laravel-waf` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-07-11
+
+### Fixed
+
+- The exclusion allow-list no longer silently disables the WAF under Laravel's
+  restricted cache deserialization. `ExclusionRuleService` cached the active
+  rules as an `Illuminate\Support\Collection`, but cache stores unserialize with
+  an `allowed_classes` restriction (`cache.serializable_classes`, which defaults
+  to `false` in Laravel 12+), so on every cache hit the value came back as
+  `__PHP_Incomplete_Class`. `active()` then threw a `TypeError`, `WafMiddleware`
+  caught it and failed open — letting every request through, including probes
+  that would otherwise be blocked. The active set is now cached as plain arrays
+  and the objects are rebuilt on read, so no host-application config change is
+  needed.
+
+### Changed
+
+- The config publish tag `waf-config` still publishes both config files, and each
+  file can now be published on its own: `waf-config-main` for `config/waf.php` and
+  `waf-config-patterns` for `config/waf-patterns.php`.
+
 ## [1.0.1] - 2026-07-08
 
 ### Added

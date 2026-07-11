@@ -48,6 +48,13 @@ php artisan vendor:publish --tag=waf-migrations
 php artisan migrate
 ```
 
+`waf-config` publishes both config files at once. To publish them separately:
+
+```bash
+php artisan vendor:publish --tag=waf-config-main # config/waf.php only
+php artisan vendor:publish --tag=waf-config-patterns # config/waf-patterns.php only
+```
+
 ## Usage
 
 Apply the `waf` middleware globally (in `bootstrap/app.php` on Laravel 11+) or per

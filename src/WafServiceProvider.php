@@ -94,10 +94,15 @@ class WafServiceProvider extends ServiceProvider
             return;
         }
 
+        // Each file is published individually so users can pull the main config
+        // and the pattern pack apart, while 'waf-config' still publishes both.
         $this->publishes([
             __DIR__.'/../config/waf.php' => config_path('waf.php'),
+        ], ['waf-config', 'waf-config-main']);
+
+        $this->publishes([
             __DIR__.'/../config/waf-patterns.php' => config_path('waf-patterns.php'),
-        ], 'waf-config');
+        ], ['waf-config', 'waf-config-patterns']);
 
         $this->publishes([
             __DIR__.'/../database/migrations/create_waf_logs_table.php.stub' => database_path(
