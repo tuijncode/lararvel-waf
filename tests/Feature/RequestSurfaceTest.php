@@ -1,5 +1,6 @@
 <?php
 
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 
 it('inspects the POST body', function () {
@@ -53,4 +54,15 @@ it('inspects the URL path', function () {
     expect($log)->not->toBeNull()
         ->and($log->category)->toBe('lfi')
         ->and($log->rule_ids)->toContain('930110');
+});
+
+it('inspects the client names of uploaded files', function () {
+    $upload = UploadedFile::fake()->create('c99.php', 1);
+
+    $this->post('/', ['doc' => $upload])->assertOk();
+
+    $log = DB::table('waf_logs')->first();
+
+    expect($log)->not->toBeNull()
+        ->and($log->type)->toContain('Web Shell Signature');
 });

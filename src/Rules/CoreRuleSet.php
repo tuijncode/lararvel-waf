@@ -50,14 +50,17 @@ class CoreRuleSet
         return in_array($id, self::BROAD_RULE_IDS, true) ? 2 : 1;
     }
 
+    /** @var array<int, Signature>|null */
+    private static ?array $rules = null;
+
     /**
-     * The full signature list as typed value objects.
+     * The full signature list as typed value objects, built once per process.
      *
      * @return array<int, Signature>
      */
     public static function rules(): array
     {
-        return array_map(
+        return self::$rules ??= array_map(
             fn (array $r): Signature => new Signature(
                 id: $r['id'],
                 category: $r['category'],
@@ -461,7 +464,8 @@ class CoreRuleSet
                 'description' => 'Log4Shell Attack: obfuscated JNDI lookup expression',
                 'severity' => 'critical',
                 'targets' => ['query', 'body', 'headers', 'cookie'],
-                'regex' => '/\$\{[^}]*(jndi|lower:|upper:|env:|sys:|::-)[^}]*\}/i',
+                // Bounded spans: an unbounded [^}]* goes quadratic on brace floods.
+                'regex' => '/\$\{[^}]{0,300}(jndi|lower:|upper:|env:|sys:|::-)[^}]{0,300}\}/i',
             ],
         ];
     }

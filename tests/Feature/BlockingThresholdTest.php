@@ -45,3 +45,35 @@ it('never blocks in detection mode', function () {
 
     expect(DB::table('waf_logs')->count())->toBe(1);
 });
+
+it('logs but does not block a flood while ddos.block is off', function () {
+    config()->set('waf.ddos.threshold', 2);
+    config()->set('waf.ddos.block', false);
+
+    // A pure flood scores 25 — below block_confidence — so it is only logged.
+    $this->get('/?q=hi')->assertOk();
+    $this->get('/?q=hi')->assertOk();
+    $this->get('/?q=hi')->assertOk(); // 3 > 2
+
+    $log = DB::table('waf_logs')->where('category', 'ddos')->first();
+    expect($log)->not->toBeNull()
+        ->and($log->action_taken)->toBe('logged');
+});
+
+it('blocks a flood on the volumetric signal when ddos.block is on', function () {
+    config()->set('waf.ddos.threshold', 2);
+    config()->set('waf.ddos.block', true);
+    config()->set('waf.block_confidence', 60); // flood scores well under this
+
+    $this->get('/?q=hi')->assertOk();
+    $this->get('/?q=hi')->assertOk();
+
+    // The next over-budget request is refused on the flood signal alone, with
+    // a Retry-After matching the ddos window.
+    $this->get('/?q=hi')
+        ->assertForbidden()
+        ->assertHeader('Retry-After', (string) config('waf.ddos.window'));
+
+    expect(DB::table('waf_logs')->where('category', 'ddos')->where('action_taken', 'blocked')->count())
+        ->toBeGreaterThan(0);
+});

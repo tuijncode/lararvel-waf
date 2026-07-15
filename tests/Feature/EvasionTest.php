@@ -30,3 +30,17 @@ it('sees through null-byte splitting', function () {
     expect($log)->not->toBeNull()
         ->and($log->rule_ids)->toContain('930110');
 });
+
+it('sees an attack pushed past the surface cap by padding', function () {
+    // 20k of junk ahead of the payload would hide it behind a hard truncation;
+    // head + tail sampling keeps the end of the body in view.
+    $this->post('/', [
+        'pad' => str_repeat('a', 20000),
+        'q' => "' UNION SELECT * FROM users--",
+    ])->assertOk();
+
+    $log = DB::table('waf_logs')->first();
+
+    expect($log)->not->toBeNull()
+        ->and($log->rule_ids)->toContain('942100');
+});

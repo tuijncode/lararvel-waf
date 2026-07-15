@@ -18,13 +18,30 @@ it('detects bundled pack signatures end to end', function (string $query, string
     'Open redirect' => ['next=//evil.example', 'Open Redirect'],
     'Prototype pollution' => ['__proto__[admin]=1', 'Prototype Pollution'],
     'GraphQL introspection' => ['q='.rawurlencode('{__schema{types{name}}}'), 'GraphQL Introspection'],
+    // Regression: `$`-anchored patterns must also match a value at the end of a
+    // query parameter, not only at the end of the whole inspected surface.
+    '.env probe via query' => ['file=.env', 'Environment File Access'],
+    'backup archive probe via query' => ['f=backup.sql', 'Backup / Archive File Probe'],
+    // Regression: leading `\b` before a literal dot broke these entirely.
+    'DS_Store probe' => ['f='.rawurlencode('/.DS_Store'), 'Sensitive Artefact Probe'],
+    'bash_history probe' => ['f='.rawurlencode('/.bash_history'), 'Sensitive Artefact Probe'],
+    // Regression: `^`-anchored web.config missed the query-value variant.
+    'web.config probe via query' => ['f=web.config', 'Server Config Access'],
 ]);
 
-it('detects a credit card number in a POST body', function () {
+it('detects a valid credit card number in a POST body', function () {
+    // A real, Luhn-valid Visa test PAN.
     $this->post('/', ['pan' => '4111111111111111'])->assertOk();
 
     $log = DB::table('waf_logs')->first();
 
     expect($log)->not->toBeNull()
         ->and($log->type)->toContain('Card Number');
+});
+
+it('ignores a 16-digit number that fails the Luhn check', function () {
+    // Right shape, wrong checksum — an order id, not a card number.
+    $this->post('/', ['order' => '4111111111111112'])->assertOk();
+
+    expect(DB::table('waf_logs')->count())->toBe(0);
 });

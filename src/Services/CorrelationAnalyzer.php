@@ -29,7 +29,9 @@ class CorrelationAnalyzer
             ->select(
                 'url',
                 DB::raw('COUNT(DISTINCT ip_address) as ips'),
-                DB::raw('COUNT(*) as hits'),
+                // hit_count folds in the requests dedup collapsed into each row,
+                // so "hits" reflects real volume rather than distinct findings.
+                DB::raw('SUM(hit_count) as hits'),
                 DB::raw('MIN(created_at) as first_seen'),
                 DB::raw('MAX(created_at) as last_seen'),
             )
@@ -55,7 +57,7 @@ class CorrelationAnalyzer
             ->select(
                 'category',
                 DB::raw('COUNT(DISTINCT ip_address) as ips'),
-                DB::raw('COUNT(*) as hits'),
+                DB::raw('SUM(hit_count) as hits'),
                 DB::raw('MIN(created_at) as first_seen'),
                 DB::raw('MAX(created_at) as last_seen'),
             )
@@ -80,13 +82,16 @@ class CorrelationAnalyzer
             ->where('created_at', '>=', now()->subMinutes($windowMinutes))
             ->select(
                 'ip_address',
-                DB::raw('COUNT(*) as hits'),
+                // SUM(hit_count), not COUNT(*): the dedup window collapses a
+                // burst of the same attack into one row, so counting rows would
+                // miss exactly the volumetric hammering this is meant to catch.
+                DB::raw('SUM(hit_count) as hits'),
                 DB::raw('COUNT(DISTINCT type) as types'),
                 DB::raw('MIN(created_at) as first_seen'),
                 DB::raw('MAX(created_at) as last_seen'),
             )
             ->groupBy('ip_address')
-            ->havingRaw('COUNT(*) >= ?', [$minHits])
+            ->havingRaw('SUM(hit_count) >= ?', [$minHits])
             ->orderByDesc('hits')
             ->limit($limit)
             ->get()

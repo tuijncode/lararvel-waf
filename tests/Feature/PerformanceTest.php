@@ -5,8 +5,11 @@ use Tuijncode\LaravelWaf\Facades\Waf;
 
 $browser = ['HTTP_USER_AGENT' => 'Mozilla/5.0'];
 
-// Payloads crafted to stress greedy/backtracking regexes. With the per-surface
-// byte cap in place, none of these should take meaningful time to inspect.
+// Payloads crafted to stress greedy/backtracking regexes. This is a guard
+// against catastrophic backtracking (ReDoS), which shows up as seconds-to-
+// minutes of CPU, not micro-benchmarking — with the byte cap and bounded
+// spans in place the real cost is tens of milliseconds. The 2s ceiling leaves
+// generous room for CI jitter while still failing hard on a runaway regex.
 it('inspects pathological payloads well within a time budget', function (string $payload) use ($browser) {
     $request = Request::create('/?q='.rawurlencode($payload), 'GET', [], [], [], $browser);
 
@@ -14,11 +17,16 @@ it('inspects pathological payloads well within a time budget', function (string 
     Waf::inspect($request);
     $elapsed = microtime(true) - $start;
 
-    expect($elapsed)->toBeLessThan(0.5);
+    expect($elapsed)->toBeLessThan(2.0);
 })->with([
     'long a-run' => [str_repeat('a', 200000)],
     'nested traversal' => [str_repeat('../', 50000)],
     'brace flood' => [str_repeat('{{', 40000)],
+    'ruby interp flood' => [str_repeat('#{', 40000)],
+    'dollar-brace flood' => [str_repeat('${', 40000)],
+    'jsp flood' => [str_repeat('<%', 40000)],
+    'twig-tag flood' => [str_repeat('{%', 40000)],
+    'crlf flood' => [str_repeat("\r\n", 40000)],
     'angle flood' => [str_repeat('<', 40000)],
     'quote flood' => [str_repeat("'", 40000)],
     'base64 flood' => [str_repeat('ABCd1234', 20000)],

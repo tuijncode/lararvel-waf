@@ -3,10 +3,13 @@
 namespace Tuijncode\LaravelWaf\Services;
 
 use Illuminate\Http\Request;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Str;
+use Symfony\Component\HttpFoundation\File\UploadedFile;
 use Tuijncode\LaravelWaf\Events\ThreatDetected;
 use Tuijncode\LaravelWaf\Jobs\StoreWafLog;
 use Tuijncode\LaravelWaf\Rules\CoreRuleSet;
@@ -25,6 +28,9 @@ class WafInspector
 {
     /** Hard cap on bytes examined per surface, so a huge payload can't stall a regex. */
     private const SURFACE_LIMIT = 16000;
+
+    /** Bytes kept from the end of an oversized surface, so padding can't push an attack out of view. */
+    private const SURFACE_TAIL = 4000;
 
     private const SEVERITIES = ['critical', 'error', 'warning', 'notice'];
 
@@ -45,7 +51,8 @@ class WafInspector
     }
 
     /**
-     * Evaluate a request. This is read-only: nothing is stored or dispatched.
+     * Evaluate a request. This is read-only: nothing is stored, dispatched or
+     * counted — the flood counter is only advanced by handle().
      */
     public function inspect(Request $request): InspectionResult
     {
@@ -54,7 +61,9 @@ class WafInspector
 
         $agent = (string) ($request->userAgent() ?? '');
         $scanner = $this->scanners->detect($agent);
-        $bot = $scanner ? null : $this->bots->detect($agent);
+        // A whitelisted agent (e.g. a known uptime monitor) is exempt from bot
+        // detection, so a legitimate curl health check isn't logged every window.
+        $bot = ($scanner || $this->isWhitelistedAgent($agent)) ? null : $this->bots->detect($agent);
         $flooding = config('waf.ddos.enabled', true)
             && $this->flood->tripped((string) $request->ip());
 
@@ -82,12 +91,38 @@ class WafInspector
     }
 
     /**
+     * Whether the agent is on the operator's allowlist of trusted automated
+     * clients (case-insensitive substring match).
+     */
+    private function isWhitelistedAgent(string $agent): bool
+    {
+        if ($agent === '') {
+            return false;
+        }
+
+        foreach ((array) config('waf.whitelisted_agents', []) as $needle) {
+            $needle = (string) $needle;
+            if ($needle !== '' && stripos($agent, $needle) !== false) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * Evaluate a request and, when warranted, record the finding + fire the event.
      * Returns the finding only when it is actionable (i.e. not an accepted
      * false positive), so callers may block on it.
      */
     public function handle(Request $request): ?InspectionResult
     {
+        // Count the request towards the client's flood budget before the
+        // read-only inspection checks it.
+        if (config('waf.ddos.enabled', true)) {
+            $this->flood->hit((string) $request->ip());
+        }
+
         $result = $this->inspect($request);
 
         if (! $result->isThreat() || $result->confidenceScore() < (int) config('waf.min_confidence', 10)) {
@@ -104,13 +139,24 @@ class WafInspector
     }
 
     /**
-     * Whether a finding warrants an actual block: only in blocking mode and
-     * only once the confidence clears `block_confidence`.
+     * Whether a finding warrants an actual block: only in blocking mode, and
+     * then either once the confidence clears `block_confidence` or — when
+     * `ddos.block` is on — on the volumetric flood signal alone.
      */
     public function shouldBlock(InspectionResult $result): bool
     {
-        return config('waf.mode', 'detection') === 'blocking'
-            && $result->confidenceScore() >= (int) config('waf.block_confidence', 60);
+        if (config('waf.mode', 'detection') !== 'blocking') {
+            return false;
+        }
+
+        // A flood's confidence score sits below the usual block threshold by
+        // design (25), so blocking it is gated on an explicit opt-in rather
+        // than on the score.
+        if ($result->isDdos && config('waf.ddos.block', false)) {
+            return true;
+        }
+
+        return $result->confidenceScore() >= (int) config('waf.block_confidence', 60);
     }
 
     /**
@@ -153,8 +199,9 @@ class WafInspector
     }
 
     /**
-     * The body as both its parsed fields (uploaded binaries removed) and its
-     * raw content, covering form-encoded, JSON and XML payloads alike.
+     * The body as its parsed fields (uploaded binaries removed), the client
+     * names of any uploaded files, and its raw content — covering form-encoded,
+     * JSON, XML and multipart payloads alike.
      */
     private function bodySurface(Request $request): string
     {
@@ -168,12 +215,36 @@ class WafInspector
             $parts[] = $this->stringify($fields);
         }
 
+        $names = $this->uploadedFileNames($request);
+        if ($names !== []) {
+            $parts[] = $this->normalise(implode("\n", $names));
+        }
+
         $raw = (string) $request->getContent();
         if ($raw !== '') {
             $parts[] = $this->normalise($raw);
         }
 
         return implode("\n", $parts);
+    }
+
+    /**
+     * Client-supplied names of uploaded files (e.g. a `c99.php` web shell).
+     * The binary content itself is never scanned.
+     *
+     * @return array<int, string>
+     */
+    private function uploadedFileNames(Request $request): array
+    {
+        $names = [];
+
+        foreach (Arr::flatten($request->allFiles()) as $file) {
+            if ($file instanceof UploadedFile) {
+                $names[] = (string) $file->getClientOriginalName();
+            }
+        }
+
+        return array_values(array_filter($names));
     }
 
     /**
@@ -211,7 +282,11 @@ class WafInspector
      */
     private function normalise(string $raw): string
     {
-        $raw = substr($raw, 0, self::SURFACE_LIMIT);
+        // Oversized payloads are sampled head + tail rather than hard-truncated,
+        // so prepending junk can't push an attack past the inspected window.
+        if (strlen($raw) > self::SURFACE_LIMIT) {
+            $raw = substr($raw, 0, self::SURFACE_LIMIT)."\n".substr($raw, -self::SURFACE_TAIL);
+        }
 
         $variants = [$raw];
 
@@ -331,6 +406,7 @@ class WafInspector
                 regex: $regex,
                 paranoia: $rich ? (int) ($definition['paranoia'] ?? $defaultParanoia) : $defaultParanoia,
                 decisive: $rich && (bool) ($definition['decisive'] ?? false),
+                validator: $rich && isset($definition['validator']) ? (string) $definition['validator'] : null,
             );
         }
 
@@ -346,13 +422,30 @@ class WafInspector
         $ip = (string) $request->ip();
         $signature = $result->summary();
 
-        $throttle = 'laravel-waf|seen|'.md5($ip.'#'.$signature);
+        // The dedup key optionally folds in the request path, so the same attack
+        // aimed at many endpoints is not collapsed into a single finding (which
+        // would hide its breadth from the correlation analytics).
+        $scope = config('waf.dedup_include_path', false)
+            ? $ip.'#'.$request->path().'#'.$signature
+            : $ip.'#'.$signature;
+
+        $hash = md5($scope);
+        $seenKey = 'laravel-waf|seen|'.$hash;
         $window = now()->addMinutes((int) config('waf.dedup_minutes', 5));
 
         // Cache::add is atomic: a false return means we saw this very recently.
-        if (! Cache::add($throttle, 1, $window)) {
+        // Rather than drop the duplicate outright, bump the hit counter on the
+        // finding it collapses into, so the true volume stays visible to the
+        // correlation analytics without writing a new row.
+        if (! Cache::add($seenKey, true, $window)) {
+            $this->bumpHitCount($hash);
+
             return;
         }
+
+        // A stable id that identifies this finding in both the sync and queued
+        // storage paths, so a ThreatDetected listener can reference the row.
+        $eventId = (string) Str::uuid();
 
         // Mask any captured secrets before they touch storage.
         $secrets = $this->redactor->sensitiveValues($result->matches);
@@ -360,6 +453,7 @@ class WafInspector
         $payload = $this->redactor->scrub(mb_substr($this->evidence($result), 0, 4000), $secrets);
 
         $row = [
+            'event_id' => $eventId,
             'ip_address' => $ip,
             'method' => $request->method(),
             'url' => $url,
@@ -373,41 +467,115 @@ class WafInspector
             'confidence_score' => $result->confidenceScore(),
             'confidence_label' => $result->confidenceLabel(),
             'action_taken' => $this->action($result, $accepted),
+            'hit_count' => 1,
             'user_id' => Auth::id(),
             'created_at' => now(),
             'updated_at' => now(),
         ];
 
-        $this->persist($row);
+        $id = $this->persist($row);
+
+        // Remember the row id (inline path only) so later duplicates within the
+        // window can bump its hit counter instead of being dropped silently.
+        if ($id !== null) {
+            Cache::put($seenKey, $id, $window);
+        }
 
         Log::warning('laravel-waf finding recorded', [
             'ip' => $ip,
+            'event_id' => $eventId,
             'signature' => $signature,
             'severity' => $result->severity(),
             'confidence' => $result->confidenceScore(),
             'action' => $row['action_taken'],
         ]);
 
-        ThreatDetected::dispatch($row, $result, $ip);
+        ThreatDetected::dispatch($row, $result, $ip, $eventId);
+    }
+
+    /**
+     * Account for a duplicate that the dedup window collapsed into an existing
+     * finding by bumping its hit counter.
+     *
+     * The row id was cached against the dedup key when the finding was first
+     * written. It is only present on the inline storage path — under queueing
+     * the row doesn't exist yet, so duplicates there are simply not tallied.
+     *
+     * To keep this off the database on a route under attack, the bumps are
+     * accumulated in the cache and flushed to the row at most once per
+     * `dedup_flush_seconds` (so the stored count is eventually consistent, up
+     * to a small tail loss if the attack stops mid-interval). Set the interval
+     * to 0 to write every bump straight through.
+     */
+    private function bumpHitCount(string $hash): void
+    {
+        $id = Cache::get('laravel-waf|seen|'.$hash);
+
+        if (! is_int($id)) {
+            return;
+        }
+
+        $flushSeconds = (int) config('waf.dedup_flush_seconds', 10);
+
+        if ($flushSeconds <= 0) {
+            $this->applyHitCount($id, 1);
+
+            return;
+        }
+
+        // Accumulate the bump in the cache — atomic and off the database.
+        $pendingKey = 'laravel-waf|pending|'.$hash;
+        $window = now()->addMinutes((int) config('waf.dedup_minutes', 5));
+        Cache::add($pendingKey, 0, $window);
+        Cache::increment($pendingKey);
+
+        // Flush the accumulated count in a single write, at most once per
+        // interval. The cooldown slot is claimed atomically with Cache::add.
+        $flushKey = 'laravel-waf|flushed|'.$hash;
+        if (! Cache::add($flushKey, true, now()->addSeconds($flushSeconds))) {
+            return;
+        }
+
+        $amount = (int) Cache::get($pendingKey, 0);
+        if ($amount > 0) {
+            // Decrement (not pull) so bumps landing between the read and here
+            // stay counted for the next flush rather than being lost.
+            Cache::decrement($pendingKey, $amount);
+            $this->applyHitCount($id, $amount);
+        }
+    }
+
+    private function applyHitCount(int $id, int $amount): void
+    {
+        try {
+            DB::table(config('waf.table_name', 'waf_logs'))
+                ->where('id', $id)
+                ->increment('hit_count', $amount, ['updated_at' => now()]);
+        } catch (\Throwable $e) {
+            Log::error('laravel-waf: could not bump hit count', ['error' => $e->getMessage()]);
+        }
     }
 
     /**
      * @param  array<string, mixed>  $row
+     * @return int|null the inserted row id (inline path), or null when queued
      */
-    private function persist(array $row): void
+    private function persist(array $row): ?int
     {
         if (config('waf.queue.enabled', false)) {
             StoreWafLog::dispatch($row)
                 ->onConnection(config('waf.queue.connection'))
                 ->onQueue(config('waf.queue.queue', 'default'));
 
-            return;
+            return null;
         }
 
         try {
-            DB::table(config('waf.table_name', 'waf_logs'))->insert($row);
+            return (int) DB::table(config('waf.table_name', 'waf_logs'))->insertGetId($row);
         } catch (\Throwable $e) {
             Log::error('laravel-waf: could not persist finding', ['error' => $e->getMessage()]);
+
+            return null;
         }
     }
 

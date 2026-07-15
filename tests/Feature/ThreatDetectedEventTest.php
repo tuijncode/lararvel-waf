@@ -1,5 +1,6 @@
 <?php
 
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Tuijncode\LaravelWaf\Events\ThreatDetected;
 use Tuijncode\LaravelWaf\Services\InspectionResult;
@@ -18,6 +19,18 @@ it('dispatches ThreatDetected with the log row, result and ip', function () {
             && $event->log['confidence_score'] > 0
             && in_array('942100', $event->result->ruleIds(), true);
     });
+});
+
+it('carries a stable event id shared by the event and the stored row', function () {
+    $captured = null;
+    Event::listen(ThreatDetected::class, function (ThreatDetected $event) use (&$captured) {
+        $captured = $event->eventId;
+    });
+
+    $this->get('/?q='.rawurlencode("' UNION SELECT * FROM users--"))->assertOk();
+
+    expect($captured)->not->toBeNull()
+        ->and(DB::table('waf_logs')->value('event_id'))->toBe($captured);
 });
 
 it('does not dispatch for a clean request', function () {

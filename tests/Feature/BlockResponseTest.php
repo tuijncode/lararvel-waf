@@ -42,6 +42,18 @@ it('dispatches the RequestBlocked event when blocking', function () use ($attack
     Event::assertDispatched(RequestBlocked::class);
 });
 
+it('throttles RequestBlocked to once per finding under repeated blocks', function () use ($attack) {
+    Event::fake([RequestBlocked::class]);
+
+    // Every request is refused, but the event fires once per IP + signature per
+    // dedup window — so listeners aren't drowned by a flood of identical blocks.
+    $this->get($attack())->assertForbidden();
+    $this->get($attack())->assertForbidden();
+    $this->get($attack())->assertForbidden();
+
+    Event::assertDispatchedTimes(RequestBlocked::class, 1);
+});
+
 it('records action_taken as blocked only when actually blocked', function () use ($attack) {
     $this->get($attack(), ['User-Agent' => 'sqlmap/1.7'])->assertForbidden();
 

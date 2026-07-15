@@ -51,6 +51,7 @@ abstract class TestCase extends Orchestra
     {
         Schema::create('waf_logs', function (Blueprint $table) {
             $table->id();
+            $table->uuid('event_id')->nullable()->unique();
             $table->string('ip_address')->index();
             $table->string('method', 10)->nullable();
             $table->text('url');
@@ -64,8 +65,10 @@ abstract class TestCase extends Orchestra
             $table->unsignedTinyInteger('confidence_score')->default(0)->index();
             $table->string('confidence_label', 20)->default('none');
             $table->string('action_taken', 20)->default('logged');
+            $table->unsignedInteger('hit_count')->default(1);
             $table->unsignedBigInteger('user_id')->nullable()->index();
             $table->timestamps();
+            $table->index('created_at');
         });
     }
 

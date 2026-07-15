@@ -4,10 +4,12 @@ namespace Tuijncode\LaravelWaf\Http\Middleware;
 
 use Closure;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use Symfony\Component\HttpFoundation\IpUtils;
 use Symfony\Component\HttpFoundation\Response;
 use Tuijncode\LaravelWaf\Events\RequestBlocked;
+use Tuijncode\LaravelWaf\Services\AutoBanManager;
 use Tuijncode\LaravelWaf\Services\InspectionResult;
 use Tuijncode\LaravelWaf\Services\WafInspector;
 
@@ -24,7 +26,10 @@ use Tuijncode\LaravelWaf\Services\WafInspector;
  */
 class WafMiddleware
 {
-    public function __construct(protected WafInspector $inspector) {}
+    public function __construct(
+        protected WafInspector $inspector,
+        protected AutoBanManager $bans,
+    ) {}
 
     public function handle(Request $request, Closure $next): Response
     {
@@ -33,31 +38,72 @@ class WafMiddleware
         }
 
         try {
+            // A banned client is refused before the inspection pipeline runs.
+            // The ban itself was recorded when it was earned, so no per-request
+            // finding or event is produced here.
+            if ($this->bans->banned((string) $request->ip())) {
+                return $this->blockResponse($request, new InspectionResult, [
+                    'Retry-After' => (string) $this->bans->duration(),
+                ]);
+            }
+
             $result = $this->inspector->handle($request);
 
             if ($result !== null && $this->inspector->shouldBlock($result)) {
-                RequestBlocked::dispatch($request, $result);
+                // The strike is per request so a flood earns its ban quickly...
+                $this->bans->strike((string) $request->ip());
+
+                // ...but the event is throttled to once per finding (same
+                // IP + signature + window as the log), so a flood can't drown
+                // listeners in duplicate RequestBlocked dispatches.
+                if ($this->announceBlock($request, $result)) {
+                    RequestBlocked::dispatch($request, $result);
+                }
 
                 return $this->blockResponse($request, $result);
             }
         } catch (\Throwable $e) {
-            // The WAF must never take the application down.
             Log::error('laravel-waf: inspection error', ['error' => $e->getMessage()]);
+
+            // Fail open by default (the WAF must never take the application
+            // down); operators running blocking mode can opt into fail-closed.
+            if (config('waf.on_error', 'open') === 'closed') {
+                return response('Service Unavailable', 503);
+            }
         }
 
         return $next($request);
     }
 
     /**
+     * Whether to dispatch RequestBlocked for this block. Throttled to once per
+     * IP + signature per dedup window, matching how often the finding itself is
+     * logged, so a flood doesn't overwhelm listeners with duplicate events.
+     */
+    protected function announceBlock(Request $request, InspectionResult $result): bool
+    {
+        $minutes = (int) config('waf.dedup_minutes', 5);
+
+        if ($minutes <= 0) {
+            return true;
+        }
+
+        $key = 'laravel-waf|announced|'.md5($request->ip().'#'.$result->summary());
+
+        return Cache::add($key, true, now()->addMinutes($minutes));
+    }
+
+    /**
      * Build the response returned to a blocked client. Honours JSON clients,
      * an optional custom view, and adds Retry-After for rate-based blocks.
+     *
+     * @param  array<string, string>  $headers
      */
-    protected function blockResponse(Request $request, InspectionResult $result): Response
+    protected function blockResponse(Request $request, InspectionResult $result, array $headers = []): Response
     {
         $status = (int) config('waf.block_response.status', 403);
         $message = (string) config('waf.block_response.message', 'Forbidden');
 
-        $headers = [];
         if ($result->isDdos) {
             $headers['Retry-After'] = (string) config('waf.ddos.window', 60);
         }

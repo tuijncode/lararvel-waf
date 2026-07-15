@@ -56,6 +56,21 @@ it('only suppresses on the configured path pattern', function () {
     expect(DB::table('waf_logs')->count())->toBe(1);
 });
 
+it('ignores an exclusion whose label is too short to be safe', function () {
+    DB::table('waf_exclusion_rules')->insert([
+        'match_label' => '94',   // would otherwise suppress every 94x-family rule
+        'path_glob' => null,
+        'is_active' => true,
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]);
+    app(ExclusionRuleService::class)->refresh();
+
+    $this->get('/?q='.rawurlencode("' UNION SELECT * FROM users--"))->assertOk();
+
+    expect(DB::table('waf_logs')->value('action_taken'))->toBe('logged');
+});
+
 it('builds an exclusion rule from a logged threat', function () {
     $this->get('/?q='.rawurlencode("' UNION SELECT * FROM users--"))->assertOk();
     $logId = DB::table('waf_logs')->value('id');

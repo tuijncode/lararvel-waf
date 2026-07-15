@@ -10,7 +10,9 @@ use Illuminate\Support\ServiceProvider;
 use Tuijncode\LaravelWaf\Console\Commands\PurgeWafLogsCommand;
 use Tuijncode\LaravelWaf\Console\Commands\WafCorrelateCommand;
 use Tuijncode\LaravelWaf\Console\Commands\WafStatsCommand;
+use Tuijncode\LaravelWaf\Console\Commands\WafUnbanCommand;
 use Tuijncode\LaravelWaf\Http\Middleware\WafMiddleware;
+use Tuijncode\LaravelWaf\Services\AutoBanManager;
 use Tuijncode\LaravelWaf\Services\BotDetector;
 use Tuijncode\LaravelWaf\Services\ConfidenceScorer;
 use Tuijncode\LaravelWaf\Services\CorrelationAnalyzer;
@@ -34,6 +36,7 @@ class WafServiceProvider extends ServiceProvider
         $this->app->singleton(DdosMonitor::class, fn () => new DdosMonitor);
         $this->app->singleton(ExclusionRuleService::class, fn () => new ExclusionRuleService);
         $this->app->singleton(Redactor::class, fn () => new Redactor);
+        $this->app->singleton(AutoBanManager::class, fn () => new AutoBanManager);
         $this->app->singleton(CorrelationAnalyzer::class, fn () => new CorrelationAnalyzer);
 
         $this->app->singleton('laravel-waf', function ($app) {
@@ -112,6 +115,15 @@ class WafServiceProvider extends ServiceProvider
                 'migrations/'.date('Y_m_d_His', time() + 1).'_create_waf_exclusion_rules_table.php'
             ),
         ], 'waf-migrations');
+
+        // Upgrade migration for installs that already ran the create migrations
+        // on an earlier version. Published on its own tag so a fresh install
+        // (whose create migration already has these columns) isn't handed it.
+        $this->publishes([
+            __DIR__.'/../database/migrations/upgrade_waf_logs_table.php.stub' => database_path(
+                'migrations/'.date('Y_m_d_His', time() + 2).'_upgrade_waf_logs_table.php'
+            ),
+        ], 'waf-migrations-upgrade');
     }
 
     protected function registerMiddleware(): void
@@ -128,6 +140,7 @@ class WafServiceProvider extends ServiceProvider
                 PurgeWafLogsCommand::class,
                 WafStatsCommand::class,
                 WafCorrelateCommand::class,
+                WafUnbanCommand::class,
             ]);
         }
     }

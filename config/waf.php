@@ -49,6 +49,21 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Error Handling
+    |--------------------------------------------------------------------------
+    |
+    | What happens to a request when inspection itself throws (cache store
+    | down, malformed request, ...).
+    |
+    | 'open'   — let the request through (availability first, the default).
+    | 'closed' — refuse the request with a 503 (security first; consider this
+    |            when running blocking mode).
+    |
+    */
+    'on_error' => env('WAF_ON_ERROR', 'open'),
+
+    /*
+    |--------------------------------------------------------------------------
     | Database Table
     |--------------------------------------------------------------------------
     |
@@ -114,8 +129,20 @@ return [
     | Identical threats from the same IP are only logged once within this many
     | minutes to avoid flooding the log table.
     |
+    | dedup_include_path — by default the key is IP + signature, so the same
+    | attack aimed at many endpoints collapses to one finding. Enable this to
+    | add the path to the key (one finding per path), which keeps the breadth
+    | of a sweep visible to the correlation analytics at the cost of more rows.
+    | dedup_flush_seconds — a duplicate bumps the finding's `hit_count` instead
+    | of being dropped. To keep that off the database on a route under attack,
+    | the bumps are accumulated in the cache and written back at most once per
+    | this many seconds (so the count is eventually consistent). Set to 0 to
+    | write every bump straight through (exact, but one UPDATE per duplicate).
+    |
     */
     'dedup_minutes' => env('WAF_DEDUP_MINUTES', 5),
+    'dedup_include_path' => env('WAF_DEDUP_INCLUDE_PATH', false),
+    'dedup_flush_seconds' => env('WAF_DEDUP_FLUSH_SECONDS', 10),
 
     /*
     |--------------------------------------------------------------------------
@@ -144,6 +171,10 @@ return [
     | only_paths — if non-empty, ONLY these (wildcard) paths are inspected.
     | skip_paths — paths excluded from inspection (assets, health checks …).
     |
+    | NOTE: Livewire's asset routes are skipped, but its update endpoint
+    | (`livewire/update`) is deliberately NOT — it carries user input worth
+    | inspecting. Add `livewire/*` to skip_paths if that proves too noisy.
+    |
     */
     'only_paths' => [
         // 'admin/*',
@@ -162,7 +193,8 @@ return [
         'telescope/*',
         'horizon/*',
         '_debugbar/*',
-        'livewire/*',
+        'livewire/livewire.js',
+        'livewire/livewire.min.js*',
     ],
 
     /*
@@ -177,6 +209,19 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Whitelisted User-Agents
+    |--------------------------------------------------------------------------
+    |
+    | Trusted automated clients (case-insensitive substring match) that are
+    | exempt from bot detection — e.g. a known uptime monitor or health-check
+    | probe that would otherwise be logged every window. Signature, scanner and
+    | flood detection still apply; only the "bot" signal is suppressed.
+    |
+    */
+    'whitelisted_agents' => array_values(array_filter(explode(',', (string) env('WAF_WHITELISTED_AGENTS', '')))),
+
+    /*
+    |--------------------------------------------------------------------------
     | DDoS Monitoring
     |--------------------------------------------------------------------------
     |
@@ -184,11 +229,39 @@ return [
     | than `threshold` requests from one client inside a `window`-second span
     | raises the flood signal.
     |
+    | Only inspected requests count towards the budget: traffic to `skip_paths`
+    | (assets, health checks) and from whitelisted IPs is not tallied.
+    |
+    | block — a flood scores below `block_confidence` by design, so in blocking
+    | mode it is logged but not refused unless you opt in here. When enabled,
+    | an over-budget client is refused (with a `Retry-After` header) on the
+    | flood signal alone.
+    |
     */
     'ddos' => [
         'enabled' => env('WAF_DDOS_ENABLED', true),
+        'block' => env('WAF_DDOS_BLOCK', false),
         'threshold' => env('WAF_DDOS_THRESHOLD', 300),
         'window' => env('WAF_DDOS_WINDOW', 60),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Auto-Ban (blocking mode)
+    |--------------------------------------------------------------------------
+    |
+    | Temporarily ban a client that keeps getting blocked: after `max_blocks`
+    | blocked requests inside a rolling `window` (seconds), the IP is refused
+    | up front for `duration` seconds — without running the full inspection
+    | pipeline on every request. Bans live in the cache and expire on their
+    | own. Only applies in blocking mode (strikes are counted per block).
+    |
+    */
+    'auto_ban' => [
+        'enabled' => env('WAF_AUTO_BAN', false),
+        'max_blocks' => env('WAF_AUTO_BAN_MAX_BLOCKS', 5),
+        'window' => env('WAF_AUTO_BAN_WINDOW', 300),
+        'duration' => env('WAF_AUTO_BAN_DURATION', 3600),
     ],
 
     /*
@@ -201,9 +274,10 @@ return [
     |
     |   '/regex/i' => 'My Label',                              // simple
     |   '/regex/i' => [                                        // full control
-    |       'label'    => 'My Label',
-    |       'severity' => 'critical',                          // critical|error|warning|notice
-    |       'targets'  => ['query', 'body', 'path', 'headers', 'cookie'],
+    |       'label'     => 'My Label',
+    |       'severity'  => 'critical',                         // critical|error|warning|notice
+    |       'targets'   => ['query', 'body', 'path', 'headers', 'cookie'],
+    |       'validator' => 'luhn',                             // optional post-match check
     |   ],
     |
     | Invalid patterns are logged once and skipped. Matches are stored under the

@@ -9,27 +9,35 @@ use Illuminate\Support\Facades\RateLimiter;
  *
  * Leans on the framework's own rate limiter to count hits per client inside a
  * decaying window, keeping this class free of any store-specific bookkeeping.
+ * Counting (`hit`) and checking (`tripped`) are separate operations, so a
+ * read-only inspection never inflates the counter.
  */
 class DdosMonitor
 {
-    public function __construct(
-        protected int $ceiling = 300,
-        protected int $windowSeconds = 60,
-    ) {
-        $this->ceiling = (int) config('waf.ddos.threshold', $ceiling);
-        $this->windowSeconds = (int) config('waf.ddos.window', $windowSeconds);
+    protected int $ceiling;
+
+    protected int $windowSeconds;
+
+    public function __construct(?int $ceiling = null, ?int $windowSeconds = null)
+    {
+        $this->ceiling = $ceiling ?? (int) config('waf.ddos.threshold', 300);
+        $this->windowSeconds = $windowSeconds ?? (int) config('waf.ddos.window', 60);
     }
 
     /**
-     * Register a hit for the client and report whether it has gone over budget.
+     * Count the current request against the client's budget.
+     */
+    public function hit(string $client): void
+    {
+        RateLimiter::hit($this->bucket($client), $this->windowSeconds);
+    }
+
+    /**
+     * Whether the client has gone over budget. Read-only: does not count a hit.
      */
     public function tripped(string $client): bool
     {
-        $bucket = 'laravel-waf|flood|'.sha1($client);
-
-        $hits = RateLimiter::hit($bucket, $this->windowSeconds);
-
-        return $hits > $this->ceiling;
+        return RateLimiter::attempts($this->bucket($client)) > $this->ceiling;
     }
 
     public function ceiling(): int
@@ -40,5 +48,10 @@ class DdosMonitor
     public function windowSeconds(): int
     {
         return $this->windowSeconds;
+    }
+
+    private function bucket(string $client): string
+    {
+        return 'laravel-waf|flood|'.sha1($client);
     }
 }

@@ -19,10 +19,15 @@ and logs — or blocks — anything that looks like an attack.
 - **Bot detection** — scripting libraries, headless browsers and empty/spoofed
   user agents.
 - **DDoS monitoring** — rate-based threshold detection over a configurable window.
+- **Auto-ban** — optionally ban an IP outright (cache-based, self-expiring) after
+  repeated blocks, so a persistent attacker stops costing a full inspection per
+  request.
 - **Confidence scoring** — every threat gets a 0-100 score derived from the CRS
   anomaly score plus contextual signals (breadth, request location, scanner/bot/DoS).
 - **Evasion-resistant** — surfaces are URL-decoded (twice), HTML-entity decoded
-  and null-byte stripped before matching.
+  and null-byte stripped before matching; oversized payloads are sampled head +
+  tail so padding can't push an attack out of view, and the client names of
+  uploaded files are inspected too.
 - **Secret redaction** — captured API keys, passwords and card numbers are masked
   before they reach `waf_logs`.
 - **`waf_logs` storage** — detected threats are persisted for auditing.
@@ -45,6 +50,17 @@ Publish the config and migration, then migrate:
 ```bash
 php artisan vendor:publish --tag=waf-config
 php artisan vendor:publish --tag=waf-migrations
+php artisan migrate
+```
+
+### Upgrading from 1.0.x
+
+1.1 adds an `event_id` column and a `created_at` index to `waf_logs`. A fresh
+install gets them from the create migration; existing installs publish the
+upgrade migration (idempotent, safe to run once) and migrate:
+
+```bash
+php artisan vendor:publish --tag=waf-migrations-upgrade
 php artisan migrate
 ```
 
@@ -91,12 +107,22 @@ Event::listen(function (ThreatDetected $event) {
     // $event->log        — the row written to waf_logs
     // $event->result     — the full InspectionResult
     // $event->ipAddress  — the offending IP
+    // $event->eventId    — UUID of the stored finding (works even when queued)
 
     if ($event->result->confidenceScore() >= 80) {
         // e.g. ban the IP, page on-call, push to your SIEM ...
     }
 });
 ```
+
+Each finding carries an `event_id` (UUID) column so a listener can reference
+the exact stored row — including when the insert is queued and the row doesn't
+exist yet at dispatch time.
+
+> **`user_id` is usually `null`.** When the middleware runs globally it
+> executes before the session/auth middleware, so `Auth::id()` isn't resolved
+> yet. Apply the `waf` middleware after `StartSession`/`Authenticate` (e.g. on
+> your `web` group) if you need the authenticated user on findings.
 
 ## Configuration
 
@@ -105,6 +131,7 @@ Key options in `config/waf.php`:
 | Option                 | Default     | Description                                                |
 |------------------------|-------------|------------------------------------------------------------|
 | `mode`                 | `detection` | `detection` (log only) or `blocking`.                      |
+| `on_error`             | `open`      | Fail `open` (let through) or `closed` (503) on error.      |
 | `min_confidence`       | `10`        | Threats below this 0-100 score are ignored.                |
 | `block_confidence`     | `60`        | In blocking mode, refuse requests at/above this score.     |
 | `paranoia_level`       | `2`         | `1` = high-confidence rules only; `2` adds broader rules.  |
@@ -113,10 +140,21 @@ Key options in `config/waf.php`:
 | `skip_paths`           | assets, …   | Wildcard paths excluded from inspection.                   |
 | `only_paths`           | `[]`        | If set, ONLY these paths are inspected.                    |
 | `whitelisted_ips`      | `[]`        | CIDR-aware IP allowlist.                                    |
+| `whitelisted_agents`   | `[]`        | User-Agent substrings exempt from bot detection.           |
+| `dedup_include_path`   | `false`     | Add the path to the dedup key (one finding per path).      |
+| `dedup_flush_seconds`  | `10`        | Coalesce `hit_count` writes; `0` writes every bump through. |
 | `ddos.threshold`       | `300`       | Requests per `ddos.window` seconds before a DoS flag.      |
+| `ddos.block`           | `false`     | In blocking mode, refuse floods on the volumetric signal.  |
+| `auto_ban.enabled`     | `false`     | Temporarily ban an IP after repeated blocks (blocking mode). |
 
 > DDoS monitoring is built on Laravel's rate limiter, so it works with any
-> configured cache store.
+> configured cache store. Only inspected requests count towards the budget:
+> traffic to `skip_paths` and from whitelisted IPs is not tallied.
+>
+> A flood scores 25 — below the default `block_confidence` (60) — so in blocking
+> mode it is logged but not refused unless you set `ddos.block` (or
+> `WAF_DDOS_BLOCK=true`). It is then refused on the flood signal alone, with a
+> `Retry-After` header.
 
 ### Blocking & the block response
 
@@ -124,8 +162,8 @@ In `blocking` mode, a request whose confidence reaches `block_confidence` is
 refused. The response is configurable (`config/waf.php` → `block_response`):
 custom status/message, a Blade `view`, automatic JSON for API clients (or
 `always_json`), and a `Retry-After` header on rate-based blocks. A
-`Tuijncode\LaravelWaf\Events\RequestBlocked` event fires on every block so you
-can ban the IP or record a metric:
+`Tuijncode\LaravelWaf\Events\RequestBlocked` event fires when a request is
+blocked so you can ban the IP or record a metric:
 
 ```php
 use Tuijncode\LaravelWaf\Events\RequestBlocked;
@@ -134,6 +172,40 @@ Event::listen(function (RequestBlocked $event) {
     Firewall::ban($event->request->ip()); // your own logic
 });
 ```
+
+Every request that trips the block is still refused, but the event is throttled
+to once per IP + signature per dedup window (the same rate the finding is
+logged at), so a flood can't drown your listener in duplicate events.
+
+### Auto-ban repeat offenders
+
+Instead of (or on top of) your own `RequestBlocked` listener, the WAF can ban a
+repeat offender itself. With `WAF_AUTO_BAN=true`, an IP that earns
+`auto_ban.max_blocks` blocks inside a rolling `auto_ban.window` (seconds) is
+refused up front for `auto_ban.duration` seconds — without running the full
+inspection pipeline on every request. Bans live in the cache and expire on
+their own. Requests refused by a standing ban are not logged again (the
+findings that earned the ban already were) and carry a `Retry-After` header.
+
+When a ban is first applied, a `Tuijncode\LaravelWaf\Events\IpBanned` event
+fires (with `$event->ipAddress` and `$event->seconds`) so you can mirror it to
+a firewall or alert. Lift a ban early from code or the console:
+
+```php
+app(\Tuijncode\LaravelWaf\Services\AutoBanManager::class)->lift('203.0.113.9');
+```
+
+```bash
+php artisan waf:unban 203.0.113.9
+```
+
+### Fail open or fail closed
+
+If inspection itself throws (say the cache store is down), the WAF fails
+**open** by default: the request goes through and the error is logged, so the
+WAF can never take your application down. Operators who prefer security over
+availability — typically in blocking mode — can set `WAF_ON_ERROR=closed` to
+refuse requests with a `503` instead.
 
 ### Tuning out false positives
 
@@ -159,9 +231,11 @@ app(ExclusionRuleService::class)->acceptFromLog(
 );
 ```
 
-A threat is suppressed when its `type` contains the rule's `pattern_label`
+A threat is suppressed when its `type` contains the rule's `match_label`
 (e.g. a rule id like `941130`) and its path matches the optional
-`path_pattern` (wildcards supported; leave empty to match any path).
+`path_glob` (wildcards supported; leave empty to match any path). Labels
+shorter than 3 characters are ignored — a substring like `94` would otherwise
+silently suppress entire rule families.
 
 Excluded threats are still written to `waf_logs` with `action_taken = 'excluded'`
 (for auditing) but are never blocked.
@@ -185,9 +259,10 @@ Add your own in `config/waf.php`:
 
     // Full control over severity and which request parts to scan
     '/forbidden/i' => [
-        'label'    => 'Forbidden Keyword',
-        'severity' => 'critical',                 // critical|error|warning|notice
-        'targets'  => ['query', 'body'],
+        'label'     => 'Forbidden Keyword',
+        'severity'  => 'critical',                // critical|error|warning|notice
+        'targets'   => ['query', 'body'],
+        'validator' => 'luhn',                    // optional post-match check (built-in: luhn)
     ],
 ],
 ```
@@ -200,7 +275,8 @@ A larger, ready-made **signature pack** ships separately in
 
 - **Secrets & API keys** — AWS, Google, Slack, GitHub / GitLab, Stripe, Twilio,
   SendGrid, npm, DigitalOcean, AI providers, private-key material and JWTs.
-- **Payment card data (PCI)** — Visa / Mastercard / Amex / Discover PANs.
+- **Payment card data (PCI)** — Visa / Mastercard / Amex / Discover PANs,
+  Luhn-validated so ordinary 16-digit values aren't mistaken for a card.
 - **Sensitive files** — `.env`, `.git`, `.ssh`, `id_rsa`, `wp-config.php`,
   backup/archive artefacts.
 - **Endpoint probing** — phpMyAdmin, WordPress, Spring Actuator, Apache status.
@@ -237,16 +313,45 @@ $analyzer->rapidAttackers(windowMinutes: 5, minHits: 10);
 $analyzer->summary(); // ['coordinated_attacks' => …, 'campaigns' => …, 'rapid_attackers' => …]
 ```
 
+Because identical threats are deduplicated (see `dedup_minutes`), each finding
+carries a `hit_count` — every request the dedup window folded into it. The
+analyzer sums `hit_count` rather than counting rows, so a high-volume flood of a
+single signature still surfaces as a rapid attacker instead of collapsing to a
+count of one. (Under queueing, duplicates aren't tallied — the row id isn't
+known synchronously — so `hit_count` stays 1 there.)
+
+To keep this off the database on a route under attack, duplicate bumps are
+accumulated in the cache and flushed at most once per `dedup_flush_seconds`
+(default 10), so the stored count is eventually consistent rather than one
+`UPDATE` per request. Set `dedup_flush_seconds` to `0` for an exact, immediate
+count if you'd rather trade the write.
+
 ### Console commands
 
 ```bash
 php artisan waf:stats --days=7    # summary: counts by category / severity / IP
 php artisan waf:correlate         # surface coordinated / distributed attacks
 php artisan waf:purge --days=90   # delete findings older than N days
+php artisan waf:unban 203.0.113.9 # lift a standing auto-ban for an IP
 ```
 
 Set `WAF_RETENTION=true` (and `WAF_RETENTION_DAYS`) to run the purge
 automatically every day at 02:00 via Laravel's scheduler.
+
+### Querying findings
+
+Findings are written with the query builder, but a read-side Eloquent model is
+provided for reporting:
+
+```php
+use Tuijncode\LaravelWaf\Models\WafLog;
+
+WafLog::where('category', 'sqli')->latest()->take(20)->get();
+```
+
+It is `Prunable`: with retention enabled, `php artisan model:prune --model="Tuijncode\LaravelWaf\Models\WafLog"`
+deletes findings past `retention.days`, an alternative to `waf:purge` if you
+already run Laravel's pruning scheduler.
 
 ### Configuration validation
 
