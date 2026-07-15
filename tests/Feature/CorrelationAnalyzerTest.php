@@ -60,6 +60,16 @@ it('detects a rapid attacker: one IP, many findings', function () {
         ->and((int) $found[0]['hits'])->toBe(12);
 });
 
+it('counts volume via hit_count, not just distinct rows', function () {
+    // A single deduplicated finding that stands for 15 requests.
+    record(['ip_address' => '6.6.6.6', 'hit_count' => 15]);
+
+    $found = $this->analyzer->rapidAttackers(windowMinutes: 5, minHits: 10);
+
+    expect($found)->toHaveCount(1)
+        ->and((int) $found[0]['hits'])->toBe(15);
+});
+
 it('ignores activity outside the window', function () {
     foreach (['1.1.1.1', '2.2.2.2', '3.3.3.3'] as $ip) {
         record(['ip_address' => $ip, 'created_at' => now()->subHours(2), 'updated_at' => now()->subHours(2)]);

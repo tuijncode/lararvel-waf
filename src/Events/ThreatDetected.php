@@ -26,10 +26,13 @@ class ThreatDetected
 
     /**
      * @param  array<string, mixed>  $log  the row written to the waf_logs table
+     * @param  ?string  $eventId  UUID identifying this finding in the log table,
+     *                            available even when the insert is queued
      */
     public function __construct(
         public readonly array $log,
         public readonly InspectionResult $result,
         public readonly ?string $ipAddress = null,
+        public readonly ?string $eventId = null,
     ) {}
 }

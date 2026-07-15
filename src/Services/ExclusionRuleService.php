@@ -23,6 +23,13 @@ class ExclusionRuleService
     private const CACHE_BUCKET = 'laravel-waf.exclusions.active';
 
     /**
+     * Labels are matched as substrings, so a very short one (e.g. "94") would
+     * silently suppress whole families of rules. Entries below this length are
+     * ignored.
+     */
+    private const MIN_LABEL_LENGTH = 3;
+
+    /**
      * Decide whether a finding should be treated as an accepted false positive.
      */
     public function accepts(string $signature, string $path): bool
@@ -30,7 +37,9 @@ class ExclusionRuleService
         $path = trim((string) parse_url($path, PHP_URL_PATH), '/');
 
         return $this->active()->contains(function (object $entry) use ($signature, $path): bool {
-            if (! str_contains($signature, $entry->match_label)) {
+            $label = (string) $entry->match_label;
+
+            if (mb_strlen($label) < self::MIN_LABEL_LENGTH || ! str_contains($signature, $label)) {
                 return false;
             }
 

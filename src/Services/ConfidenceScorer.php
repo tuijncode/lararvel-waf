@@ -56,8 +56,10 @@ class ConfidenceScorer
             $score += 30;
         }
 
+        // Enough to clear the default min_confidence (10) on its own, so a
+        // bot-only finding is actually recorded rather than silently dropped.
         if ($isBot) {
-            $score += 8;
+            $score += 12;
         }
 
         if ($isDdos) {

@@ -47,3 +47,12 @@ it('only inspects only_paths when configured', function () use ($attack) {
     $this->get('/api/search?'.$attack())->assertOk(); // matches api/*
     expect(DB::table('waf_logs')->count())->toBe(1);
 });
+
+it('inspects the livewire update endpoint but skips its assets', function () use ($attack) {
+    // The default skip list carves out Livewire's JS asset, not its update route.
+    $this->get('/livewire/livewire.js?'.$attack())->assertOk();
+    expect(DB::table('waf_logs')->count())->toBe(0);
+
+    $this->get('/livewire/update?'.$attack())->assertOk();
+    expect(DB::table('waf_logs')->count())->toBe(1);
+});

@@ -4,6 +4,7 @@ namespace Tuijncode\LaravelWaf\Support;
 
 use Tuijncode\LaravelWaf\Rules\CoreRuleSet;
 use Tuijncode\LaravelWaf\Rules\Signature;
+use Tuijncode\LaravelWaf\Rules\Validators;
 
 /**
  * Sanity-checks the published configuration so a typo in `.env` (e.g.
@@ -13,6 +14,8 @@ use Tuijncode\LaravelWaf\Rules\Signature;
 class ConfigValidator
 {
     private const SEVERITIES = ['critical', 'error', 'warning', 'notice'];
+
+    private const SURFACES = ['query', 'body', 'path', 'headers', 'cookie'];
 
     /**
      * Return a list of human-readable problems, or an empty array if the
@@ -25,6 +28,7 @@ class ConfigValidator
         $problems = [];
 
         $this->oneOf($problems, 'waf.mode', ['detection', 'blocking']);
+        $this->oneOf($problems, 'waf.on_error', ['open', 'closed']);
         $this->oneOf($problems, 'waf.custom_pattern_severity', self::SEVERITIES);
 
         $this->intRange($problems, 'waf.paranoia_level', 1, 4);
@@ -33,13 +37,76 @@ class ConfigValidator
         $this->intRange($problems, 'waf.block_confidence', 0, 100);
         $this->intRange($problems, 'waf.block_response.status', 100, 599);
         $this->intRange($problems, 'waf.dedup_minutes', 0, 1440);
+        $this->intRange($problems, 'waf.dedup_flush_seconds', 0, 3600);
 
         $this->positiveInt($problems, 'waf.ddos.threshold');
         $this->positiveInt($problems, 'waf.ddos.window');
 
+        $this->positiveInt($problems, 'waf.auto_ban.max_blocks');
+        $this->positiveInt($problems, 'waf.auto_ban.window');
+        $this->positiveInt($problems, 'waf.auto_ban.duration');
+
+        $this->environments($problems);
         $this->knownCategories($problems);
+        $this->customPatterns($problems);
 
         return $problems;
+    }
+
+    /**
+     * @param  array<int, string>  $problems
+     */
+    private function environments(array &$problems): void
+    {
+        $environments = config('waf.enabled_environments');
+
+        if ($environments !== null && ! is_array($environments)) {
+            $problems[] = 'waf.enabled_environments must be null or an array of environment names, got '
+                .$this->show($environments).'.';
+        }
+    }
+
+    /**
+     * Check the operator's own signatures (and the published pattern pack): the
+     * regex must compile, and any explicit severity or target must be known —
+     * a typo in `targets` would otherwise make the pattern silently dead.
+     *
+     * @param  array<int, string>  $problems
+     */
+    private function customPatterns(array &$problems): void
+    {
+        $pack = config('waf.pattern_pack', true) ? (array) config('waf-patterns.custom', []) : [];
+        $definitions = array_merge($pack, (array) config('waf.custom_patterns', []));
+
+        foreach ($definitions as $regex => $definition) {
+            $regex = (string) $regex;
+
+            if (@preg_match($regex, '') === false) {
+                $problems[] = "custom pattern '{$regex}' is not a valid regular expression.";
+            }
+
+            if (! is_array($definition)) {
+                continue;
+            }
+
+            $severity = $definition['severity'] ?? null;
+            if ($severity !== null && ! in_array($severity, self::SEVERITIES, true)) {
+                $problems[] = "custom pattern '{$regex}' has unknown severity '{$severity}'"
+                    .' (allowed: '.implode(', ', self::SEVERITIES).').';
+            }
+
+            foreach ((array) ($definition['targets'] ?? []) as $target) {
+                if (! in_array($target, self::SURFACES, true)) {
+                    $problems[] = "custom pattern '{$regex}' targets unknown surface '{$target}'"
+                        .' (known: '.implode(', ', self::SURFACES).').';
+                }
+            }
+
+            $validator = $definition['validator'] ?? null;
+            if ($validator !== null && ! Validators::known((string) $validator)) {
+                $problems[] = "custom pattern '{$regex}' names unknown validator '{$validator}'.";
+            }
+        }
     }
 
     /**
