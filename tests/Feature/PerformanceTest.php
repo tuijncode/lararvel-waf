@@ -31,6 +31,15 @@ it('inspects pathological payloads well within a time budget', function (string 
     'quote flood' => [str_repeat("'", 40000)],
     'base64 flood' => [str_repeat('ABCd1234', 20000)],
     'union flood' => [str_repeat('union select ', 5000)],
+    // Comment-open floods stress the SQL-comment stripping pass: an unclosed
+    // /* must not send the lazy scan quadratic.
+    'block-comment-open flood' => [str_repeat('/*', 40000)],
+    'exec-comment-open flood' => [str_repeat('/*!', 30000)],
+    'line-comment flood' => [str_repeat('-- ', 40000)],
+    'hash-comment flood' => [str_repeat('#', 40000)],
+    // Backslash-escape decoding must stay linear on a flood of escape openers.
+    'backslash-u flood' => [str_repeat('\\u', 40000)],
+    'backslash-x flood' => [str_repeat('\\x', 40000)],
 ]);
 
 it('still detects an attack buried in a large payload', function () use ($browser) {

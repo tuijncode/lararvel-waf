@@ -40,6 +40,8 @@ class CoreRuleSet
         '932120', // unix binary
         '934110', // loopback SSRF
         '934120', // private-network SSRF
+        '943100', // LDAP injection (parenthesis/filter syntax — FP-prone)
+        '943110', // XPath injection (axis/function syntax — FP-prone)
     ];
 
     /**
@@ -93,6 +95,8 @@ class CoreRuleSet
             self::xmlExternalEntity(),
             self::javaAndLog4Shell(),
             self::noSqlInjection(),
+            self::ldapInjection(),
+            self::xpathInjection(),
         );
     }
 
@@ -172,6 +176,26 @@ class CoreRuleSet
                 'targets' => ['query', 'body', 'path'],
                 'regex' => '/(--\s|#\s|\/\*!?)|;\s*(--|#)/',
             ],
+            [
+                'id' => '942180',
+                'category' => 'sqli',
+                'name' => 'SQL Injection',
+                'description' => 'SQL Injection Attack: CHAR()/CHR() character-code encoding used to build a string',
+                'severity' => 'critical',
+                'targets' => ['query', 'body'],
+                // Four or more comma-separated codes: that is the encoding-bypass
+                // shape, not the odd legitimate single CHAR(10) newline.
+                'regex' => '/\b(?:char|chr)\s*\(\s*\d{1,3}\s*(?:,\s*\d{1,3}\s*){3,}\)/i',
+            ],
+            [
+                'id' => '942190',
+                'category' => 'sqli',
+                'name' => 'SQL Injection',
+                'description' => 'SQL Injection Attack: UNHEX() hex-string decoding',
+                'severity' => 'error',
+                'targets' => ['query', 'body'],
+                'regex' => '/\bunhex\s*\(/i',
+            ],
         ];
     }
 
@@ -241,6 +265,17 @@ class CoreRuleSet
                 'severity' => 'critical',
                 'targets' => ['query', 'body', 'path'],
                 'regex' => '/%3c\s*script|&lt;\s*script/i',
+            ],
+            [
+                'id' => '941170',
+                'category' => 'xss',
+                'name' => 'XSS',
+                'description' => 'XSS Attack: CSS expression() in a style context',
+                'severity' => 'error',
+                'targets' => ['query', 'body'],
+                // Bounded span between the style attribute and expression() so a
+                // long run of non-'>' characters can't turn the match quadratic.
+                'regex' => '/style\s*=[^>]{0,200}?\bexpression\s*\(/i',
             ],
         ];
     }
@@ -339,6 +374,28 @@ class CoreRuleSet
                 'targets' => ['query', 'body'],
                 'regex' => '/(\/bin\/(ba|z|c|k)?sh)|(\/dev\/tcp\/)|(bash\s+-i)/i',
             ],
+            [
+                'id' => '932140',
+                'category' => 'rce',
+                'name' => 'RCE',
+                'description' => 'RCE Attack: Shellshock function-definition injection (CVE-2014-6271)',
+                'severity' => 'critical',
+                'targets' => ['query', 'body', 'headers', 'cookie'],
+                // The empty function definition followed by a command is the
+                // Shellshock signature; it rides in on User-Agent/Referer too.
+                'regex' => '/\(\s*\)\s*\{\s*[^}]{0,60}\}\s*;/',
+            ],
+            [
+                'id' => '932150',
+                'category' => 'rce',
+                'name' => 'RCE',
+                'description' => 'RCE Attack: Windows command execution (cmd.exe / PowerShell / wscript / net user)',
+                'severity' => 'critical',
+                'targets' => ['query', 'body', 'headers'],
+                // Each alternative requires the executable *plus* an argument or
+                // flag, so ordinary prose mentioning "powershell" won't trip it.
+                'regex' => '/\bcmd(?:\.exe)?\s*\/[ck]\b|\bpowershell(?:\.exe)?\b[^\n]{0,40}?(?:-e(?:nc|ncodedcommand)?\b|-c(?:ommand)?\b|iex\b|invoke-|downloadstring)|\b[wc]script\.exe\b|\bnet(?:\.exe)?\s+(?:user|localgroup)\b/i',
+            ],
         ];
     }
 
@@ -382,6 +439,18 @@ class CoreRuleSet
                 'targets' => ['query', 'body', 'cookie'],
                 'regex' => '/\bO:\d+:"[a-z_\x80-\xff][a-z0-9_\x80-\xff]*":\d+:{/i',
             ],
+            [
+                'id' => '933140',
+                'category' => 'php',
+                'name' => 'PHP Injection',
+                'description' => 'PHP Injection Attack: RCE-prone function / setting (preg_replace /e, allow_url_include, php_uname, get_current_user)',
+                'severity' => 'critical',
+                'targets' => ['query', 'body'],
+                // preg_replace with the deprecated /e modifier evaluates its
+                // replacement as code; allow_url_include enables remote include.
+                // The pattern span is bounded so it stays linear.
+                'regex' => '/\ballow_url_(?:include|fopen)\b|\b(?:php_uname|get_current_user)\s*\(|\bpreg_replace(?:_callback)?\s*\(\s*(["\'])[^"\']{0,200}\/[a-z]{0,10}e[a-z]{0,10}\1/i',
+            ],
         ];
     }
 
@@ -415,6 +484,26 @@ class CoreRuleSet
                 'severity' => 'error',
                 'targets' => ['query', 'body'],
                 'regex' => '/(https?|gopher|dict|ftp):\/\/(10\.\d{1,3}|172\.(1[6-9]|2\d|3[01])|192\.168)\.\d{1,3}\.\d{1,3}/i',
+            ],
+            [
+                'id' => '934130',
+                'category' => 'ssrf',
+                'name' => 'SSRF',
+                'description' => 'SSRF Attack: encoded loopback address (hex/decimal/octal 127.0.0.1)',
+                'severity' => 'error',
+                'targets' => ['query', 'body', 'headers'],
+                // The encoding is the tell: 0x7f000001, 2130706433, 0177.0.0.1
+                // and ::ffff:127.* all resolve to loopback and evade rule 934110.
+                'regex' => '/(?:https?|gopher|dict|ftp):\/\/(?:0x7f[0-9a-f]{6}\b|2130706433\b|0177\.0\.0\.1\b|\[?::ffff:127\.)/i',
+            ],
+            [
+                'id' => '934140',
+                'category' => 'ssrf',
+                'name' => 'SSRF',
+                'description' => 'SSRF Attack: DNS-rebinding service embedding an IP address (nip.io/sslip.io/xip.io)',
+                'severity' => 'error',
+                'targets' => ['query', 'body', 'headers'],
+                'regex' => '/\b\d{1,3}[.-]\d{1,3}[.-]\d{1,3}[.-]\d{1,3}\.(?:nip|sslip|xip)\.io\b/i',
             ],
         ];
     }
@@ -482,6 +571,48 @@ class CoreRuleSet
                 'severity' => 'critical',
                 'targets' => ['query', 'body'],
                 'regex' => '/[\[{"\']?\s*\$(ne|gt|gte|lt|lte|where|regex|in|nin|or|and|not|exists)\s*["\']?\s*[:=]/i',
+            ],
+        ];
+    }
+
+    /**
+     * REQUEST-943: LDAP Injection.
+     *
+     * Broad by nature (parenthesis-and-operator soup also appears in ordinary
+     * text), so these run at paranoia level 2 — see BROAD_RULE_IDS.
+     */
+    protected static function ldapInjection(): array
+    {
+        return [
+            [
+                'id' => '943100',
+                'category' => 'ldapi',
+                'name' => 'LDAP Injection',
+                'description' => 'LDAP Injection Attack: filter-syntax manipulation (e.g. )(|( or *)(uid=*)',
+                'severity' => 'error',
+                'targets' => ['query', 'body'],
+                'regex' => '/\)\s*\(\s*[|&]|\*\s*\)\s*\(|\)\s*\(\s*(?:uid|cn|sn|mail|givenname|objectclass|userpassword)\s*=/i',
+            ],
+        ];
+    }
+
+    /**
+     * REQUEST-943: XPath Injection.
+     *
+     * Also paranoia level 2 — XPath axis/function syntax overlaps with URL
+     * paths and ordinary punctuation.
+     */
+    protected static function xpathInjection(): array
+    {
+        return [
+            [
+                'id' => '943110',
+                'category' => 'xpathi',
+                'name' => 'XPath Injection',
+                'description' => 'XPath Injection Attack: axis / node-test / function syntax',
+                'severity' => 'error',
+                'targets' => ['query', 'body'],
+                'regex' => '/\b(?:ancestor|descendant|following|preceding|self)::|\/\/\w+\[|\/text\s*\(\s*\)|\b(?:count|substring|string-length|name)\s*\(\s*\/\//i',
             ],
         ];
     }

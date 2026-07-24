@@ -199,13 +199,50 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Safe Fields
+    |--------------------------------------------------------------------------
+    |
+    | Input fields excluded from inspection, to silence false positives on
+    | rich-text or free-form fields (a CMS body, a code snippet, a WYSIWYG
+    | field) without disabling a whole rule. Names are matched against the
+    | dot-notation path of each value, with `*` wildcards:
+    |
+    |   'content'            — the top-level "content" field and everything under it
+    |   'post.body'          — a nested field
+    |   'blocks.*.html'      — the "html" key of every entry in "blocks"
+    |
+    | When this list is non-empty the raw request body/query string is no longer
+    | scanned wholesale (it would smuggle a safe field's value back in); the
+    | parsed input — minus the safe fields — is scanned instead.
+    |
+    */
+    'safe_fields' => [
+        // 'content',
+        // 'post.body',
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Whitelisted IPs
     |--------------------------------------------------------------------------
     |
     | Requests from these IPs (CIDR supported) skip inspection entirely.
     |
     */
-    'whitelisted_ips' => array_values(array_filter(explode(',', (string) env('WAF_WHITELISTED_IPS', '')))),
+    'whitelisted_ips' => array_values(array_filter(array_map('trim', explode(',', (string) env('WAF_WHITELISTED_IPS', ''))))),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Blocklisted IPs
+    |--------------------------------------------------------------------------
+    |
+    | Requests from these IPs (CIDR supported) are refused up front — before any
+    | inspection, on every path, in either mode. This is an explicit operator
+    | denylist, independent of the scoring engine, so it fires even in detection
+    | mode. A whitelisted IP takes precedence if an address appears in both.
+    |
+    */
+    'blocklisted_ips' => array_values(array_filter(array_map('trim', explode(',', (string) env('WAF_BLOCKLISTED_IPS', ''))))),
 
     /*
     |--------------------------------------------------------------------------
@@ -218,7 +255,7 @@ return [
     | flood detection still apply; only the "bot" signal is suppressed.
     |
     */
-    'whitelisted_agents' => array_values(array_filter(explode(',', (string) env('WAF_WHITELISTED_AGENTS', '')))),
+    'whitelisted_agents' => array_values(array_filter(array_map('trim', explode(',', (string) env('WAF_WHITELISTED_AGENTS', ''))))),
 
     /*
     |--------------------------------------------------------------------------

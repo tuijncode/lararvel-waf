@@ -131,6 +131,8 @@ return [
         '/\/_ignition\/execute-solution\b/i' => $c('Laravel Ignition RCE (CVE-2021-3129)', ['query', 'path', 'body']),
         '/eval-stdin\.php\b/i' => $c('PHPUnit RCE (CVE-2017-9841)', ['query', 'path']),
         '/class\.(?:module\.)?classLoader/i' => $c('Spring4Shell (class.classLoader)', ['query', 'body']),
+        // Drupalgeddon2 (CVE-2018-7600): render-array keys smuggled into input.
+        '/#(?:pre_render|post_render|lazy_builder|access_callback)\b/i' => $c('Drupalgeddon Render Injection', ['query', 'body']),
         '/%\{[^}]{0,200}\}|@java\.lang\.(?:Runtime|ProcessBuilder)@|\(#[a-z_]+=/i' => $c('OGNL / Struts Injection', ['query', 'body']),
         '/<!--\s*#\s*(?:exec|include|echo|config|fsize|flastmod)\b/i' => $c('Server-Side Include Injection', ['query', 'body']),
         '/(?:__proto__|constructor\s*[\[.]\s*prototype|prototype\s*\[\s*["\']__proto__)/i' => $e('Prototype Pollution', ['query', 'body']),
@@ -139,6 +141,8 @@ return [
         // Insecure deserialization
         // ---------------------------------------------------------------
         '/(?:^|[^A-Za-z0-9+\/])rO0AB[A-Za-z0-9+\/]{8,}/' => $c('Java Deserialization Payload', ['query', 'body', 'cookie', 'headers']),
+        // Raw/hex form of the same Java serialization stream magic (0xACED0005).
+        '/(?:^|[^0-9a-f])aced0005[0-9a-f]{8,}/i' => $c('Java Deserialization Payload (hex)', ['query', 'body', 'cookie', 'headers']),
         '/AAEAAAD\/\/\/\//' => $c('.NET Deserialization Payload', ['query', 'body', 'cookie']),
 
         // ---------------------------------------------------------------

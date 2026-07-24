@@ -4,6 +4,90 @@ All notable changes to `tuijncode/laravel-waf` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-07-24
+
+### Added
+
+- New Shellshock (CVE-2014-6271) signature (rule 932140), matching the empty
+  function-definition injection across the query, body, headers and cookies.
+- Windows command-execution signature (rule 932150) covering `cmd.exe /c`,
+  PowerShell with an execution flag (`-enc`, `-command`, `iex`, `invoke-`,
+  `downloadstring`), `wscript.exe` / `cscript.exe` and `net user` /
+  `net localgroup` — the existing RCE rules only knew unix binaries.
+- Encoded-loopback SSRF signature (rule 934130): the hex (`0x7f000001`),
+  decimal (`2130706433`), octal (`0177.0.0.1`) and `::ffff:127.*` forms of
+  127.0.0.1 that bypass the plain loopback rule.
+- DNS-rebinding SSRF signature (rule 934140) for IP-embedding services
+  (`nip.io`, `sslip.io`, `xip.io`).
+- SQL `CHAR()` / `CHR()` character-code encoding signature (rule 942180),
+  requiring four or more codes so a legitimate single `CHAR(10)` is left alone.
+- PHP RCE-prone function/setting signature (rule 933140): `preg_replace` with
+  the code-evaluating `/e` modifier, `allow_url_include` / `allow_url_fopen`
+  and `php_uname()`.
+- LDAP injection (rule 943100, category `ldapi`) and XPath injection (rule
+  943110, category `xpathi`) signatures. Both overlap with ordinary
+  punctuation, so they run only at paranoia level 2.
+- Java deserialization detection now also matches the raw/hex stream magic
+  (`aced0005…`) alongside the existing base64 (`rO0AB…`) form.
+- Scanner fingerprints for Arachni, Wapiti, Skipfish, Commix, Jaeles, Dalfox,
+  XSStrike, JoomScan, DroopeScan, WhatWeb, Qualys, FeroxBuster, FFUF and Wfuzz.
+- Request normalisation now also decodes IIS `%uXXXX` escapes (e.g.
+  `%u003cscript%u003e` → `<script>`) and JS/JSON-style backslash escapes
+  (`\uXXXX` and `\xXX`), closing encoding-based evasions that ordinary
+  percent-decoding left intact.
+- Extra signatures: CSS `expression()` XSS (rule 941170), SQL `UNHEX()` hex
+  decoding (rule 942190), `get_current_user()` folded into the PHP RCE rule
+  (933140), and Drupalgeddon2 render-array injection (CVE-2018-7600) in the
+  pattern pack.
+- Request normalisation now folds away SQL comments, so inline-comment evasion
+  (a block comment wedged between `UNION` and `SELECT`, a MySQL executable
+  comment `/*!…*/`, or a trailing `-- ` / `#`) is caught by the keyword rules
+  even at paranoia level 1 — where the broad comment-sequence rule (942170) is
+  off and the previously un-normalised payload slipped through entirely.
+- Static IP denylist (`blocklisted_ips`, `WAF_BLOCKLISTED_IPS`): CIDR-aware,
+  refused up front before any inspection, on every path and in either mode —
+  the deny-side mirror of `whitelisted_ips`. A whitelisted IP wins on overlap.
+- `safe_fields`: exclude named input fields from inspection to silence false
+  positives on rich-text / free-form fields, without disabling a whole rule.
+  Matches the dot-notation path of each value with `*` wildcards (`content`,
+  `post.body`, `blocks.*.html`); when set, the raw body/query is no longer
+  scanned wholesale so a safe field's value can't leak back in.
+- `waf:test` command: dry-run a payload through the inspector and print the
+  signatures it trips, the confidence/anomaly/severity, and whether it would
+  block — for tuning rules and reproducing a false positive. Read-only: nothing
+  is logged, counted or blocked.
+- `waf:export` command: export offending IPs from `waf_logs` as an edge
+  blocklist (`plain`, `nginx`, `apache`, `csv`), filtered by `--min-level`,
+  `--days`, `--min-hits` and `--limit`, ordered by hit volume. Data goes to
+  stdout for redirection; the CSV path carries a formula-injection guard.
+
+### Fixed
+
+- A single invalid UTF-8 byte in any request field no longer blinds the WAF to
+  the whole parsed surface: `json_encode` returned `false` on such input and the
+  surface silently became an empty string. On multipart requests (where no raw
+  body is available to fall back on) that made the entire body invisible to
+  every signature. Encoding now uses `JSON_INVALID_UTF8_SUBSTITUTE`.
+- The OWASP ZAP scanner fingerprint is no longer the bare substring `zap`,
+  which also matched legitimate agents such as Zapier's webhook client. It now
+  matches `owasp zap` and `zaproxy`.
+- A failed `waf_logs` write no longer claims the dedup slot: the finding was
+  suppressed for the whole dedup window with nothing stored, so a transient
+  database error could drop an attack from the log entirely. The slot is now
+  released on a failed write and the next occurrence retries.
+- Comma-separated `WAF_WHITELISTED_IPS` / `WAF_WHITELISTED_AGENTS` entries are
+  now trimmed, so `"1.2.3.4, 5.6.7.8"` whitelists the second address too
+  (previously the leading space made it silently never match).
+- `vendor:publish --tag=waf-migrations` is now idempotent: a migration
+  published earlier keeps its filename instead of being duplicated under a
+  fresh timestamp on every re-publish.
+- Declared the `illuminate/bus`, `illuminate/console`, `illuminate/events` and
+  `illuminate/queue` dependencies that the console commands, events and the
+  queued log job import.
+- `waf:purge` now selects the findings to delete (and their dependent exclusion
+  rules) with a DB-side subquery instead of loading every doomed id into PHP
+  memory, so a large purge no longer risks a memory spike.
+
 ## [1.1.0] - 2026-07-15
 
 ### Added

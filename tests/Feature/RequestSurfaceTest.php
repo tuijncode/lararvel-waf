@@ -56,6 +56,34 @@ it('inspects the URL path', function () {
         ->and($log->rule_ids)->toContain('930110');
 });
 
+it('still inspects the other fields when one field holds invalid UTF-8', function () {
+    // "\xC3\x28" is a truncated UTF-8 sequence. Without JSON_INVALID_UTF8_SUBSTITUTE
+    // it makes json_encode return false, silently blanking the parsed surface —
+    // an attacker could append such a byte to any field to blind the WAF.
+    $this->post('/', ['junk' => "\xC3\x28", 'q' => "' OR 1=1 --"])->assertOk();
+
+    $log = DB::table('waf_logs')->first();
+
+    expect($log)->not->toBeNull()
+        ->and($log->category)->toBe('sqli')
+        ->and($log->rule_ids)->toContain('942120');
+});
+
+it('inspects parsed JSON fields, defeating \u003c-style escape evasion', function () {
+    // JSON_HEX_TAG escapes the angle brackets as \u003c / \u003e, so the raw
+    // body never contains a literal "<script" — only parsing the JSON bag
+    // reveals the payload.
+    $payload = (string) json_encode(['q' => '<script>alert(1)</script>'], JSON_HEX_TAG);
+
+    $this->call('POST', '/', [], [], [], ['CONTENT_TYPE' => 'application/json'], $payload)->assertOk();
+
+    $log = DB::table('waf_logs')->first();
+
+    expect($log)->not->toBeNull()
+        ->and($log->category)->toBe('xss')
+        ->and($log->rule_ids)->toContain('941100');
+});
+
 it('inspects the client names of uploaded files', function () {
     $upload = UploadedFile::fake()->create('c99.php', 1);
 

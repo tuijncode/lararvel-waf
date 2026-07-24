@@ -33,6 +33,23 @@ class WafMiddleware
 
     public function handle(Request $request, Closure $next): Response
     {
+        // Explicit per-IP verdicts are settled before any path/mode logic, so a
+        // denylisted client is refused everywhere (even on skip_paths) and a
+        // whitelisted one is never touched. Allow wins over deny on overlap.
+        if (config('waf.enabled', true)) {
+            $ip = (string) $request->ip();
+
+            if ($ip !== '' && IpUtils::checkIp($ip, (array) config('waf.whitelisted_ips', []))) {
+                return $next($request);
+            }
+
+            if ($ip !== '' && IpUtils::checkIp($ip, (array) config('waf.blocklisted_ips', []))) {
+                Log::warning('laravel-waf: request refused (denylisted IP)', ['ip' => $ip]);
+
+                return $this->blockResponse($request, new InspectionResult);
+            }
+        }
+
         if (! $this->shouldInspect($request)) {
             return $next($request);
         }

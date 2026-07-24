@@ -9,7 +9,9 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\ServiceProvider;
 use Tuijncode\LaravelWaf\Console\Commands\PurgeWafLogsCommand;
 use Tuijncode\LaravelWaf\Console\Commands\WafCorrelateCommand;
+use Tuijncode\LaravelWaf\Console\Commands\WafExportCommand;
 use Tuijncode\LaravelWaf\Console\Commands\WafStatsCommand;
+use Tuijncode\LaravelWaf\Console\Commands\WafTestCommand;
 use Tuijncode\LaravelWaf\Console\Commands\WafUnbanCommand;
 use Tuijncode\LaravelWaf\Http\Middleware\WafMiddleware;
 use Tuijncode\LaravelWaf\Services\AutoBanManager;
@@ -108,22 +110,33 @@ class WafServiceProvider extends ServiceProvider
         ], ['waf-config', 'waf-config-patterns']);
 
         $this->publishes([
-            __DIR__.'/../database/migrations/create_waf_logs_table.php.stub' => database_path(
-                'migrations/'.date('Y_m_d_His').'_create_waf_logs_table.php'
-            ),
-            __DIR__.'/../database/migrations/create_waf_exclusion_rules_table.php.stub' => database_path(
-                'migrations/'.date('Y_m_d_His', time() + 1).'_create_waf_exclusion_rules_table.php'
-            ),
+            __DIR__.'/../database/migrations/create_waf_logs_table.php.stub' => $this->migrationPath('create_waf_logs_table'),
+            __DIR__.'/../database/migrations/create_waf_exclusion_rules_table.php.stub' => $this->migrationPath('create_waf_exclusion_rules_table', 1),
         ], 'waf-migrations');
 
         // Upgrade migration for installs that already ran the create migrations
         // on an earlier version. Published on its own tag so a fresh install
         // (whose create migration already has these columns) isn't handed it.
         $this->publishes([
-            __DIR__.'/../database/migrations/upgrade_waf_logs_table.php.stub' => database_path(
-                'migrations/'.date('Y_m_d_His', time() + 2).'_upgrade_waf_logs_table.php'
-            ),
+            __DIR__.'/../database/migrations/upgrade_waf_logs_table.php.stub' => $this->migrationPath('upgrade_waf_logs_table', 2),
         ], 'waf-migrations-upgrade');
+    }
+
+    /**
+     * Target path for a published migration. A migration published earlier
+     * (under a then-current timestamp) keeps its filename, so re-running
+     * vendor:publish skips it (or overwrites in place under --force) instead
+     * of minting a duplicate copy with a fresh timestamp.
+     */
+    protected function migrationPath(string $name, int $offset = 0): string
+    {
+        $existing = glob(database_path('migrations/*_'.$name.'.php')) ?: [];
+
+        if ($existing !== []) {
+            return $existing[0];
+        }
+
+        return database_path('migrations/'.date('Y_m_d_His', time() + $offset).'_'.$name.'.php');
     }
 
     protected function registerMiddleware(): void
@@ -141,6 +154,8 @@ class WafServiceProvider extends ServiceProvider
                 WafStatsCommand::class,
                 WafCorrelateCommand::class,
                 WafUnbanCommand::class,
+                WafTestCommand::class,
+                WafExportCommand::class,
             ]);
         }
     }

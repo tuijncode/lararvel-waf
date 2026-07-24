@@ -185,12 +185,15 @@ class WafInspector
     {
         $parts = [];
 
+        // When safe fields are configured, the raw query string is skipped (it
+        // would reintroduce a safe field's value); the filtered parsed params
+        // are scanned instead. A query with no params has nothing to protect.
         $raw = $request->getQueryString();
-        if ($raw !== null && $raw !== '') {
+        if ($raw !== null && $raw !== '' && ! ($this->hasSafeFields() && $request->query->all() !== [])) {
             $parts[] = $this->normalise('?'.rawurldecode($raw));
         }
 
-        $params = $request->query->all();
+        $params = $this->withoutSafeFields($request->query->all());
         if ($params !== []) {
             $parts[] = $this->stringify($params);
         }
@@ -207,7 +210,12 @@ class WafInspector
     {
         $parts = [];
 
-        $fields = $request->request->all();
+        // On JSON requests this bag holds the parsed JSON fields (Laravel
+        // swaps in the JSON input source), with \uXXXX escapes decoded —
+        // RequestSurfaceTest pins that, since the raw content alone would
+        // let an escape-encoded payload slip past every signature.
+        $bag = $request->request->all();
+        $fields = $this->withoutSafeFields($bag);
         foreach (array_keys($request->allFiles()) as $fileField) {
             unset($fields[$fileField]);
         }
@@ -220,12 +228,64 @@ class WafInspector
             $parts[] = $this->normalise(implode("\n", $names));
         }
 
+        // The raw body is skipped when safe fields are configured and the body
+        // parsed into named fields — otherwise a safe field's value would leak
+        // back in through the raw content. Unstructured bodies (raw XML/text,
+        // which have no named fields to protect) are still scanned raw.
         $raw = (string) $request->getContent();
-        if ($raw !== '') {
+        if ($raw !== '' && ! ($this->hasSafeFields() && $bag !== [])) {
             $parts[] = $this->normalise($raw);
         }
 
         return implode("\n", $parts);
+    }
+
+    /**
+     * Whether the operator has configured any safe (excluded) fields.
+     */
+    private function hasSafeFields(): bool
+    {
+        return (array) config('waf.safe_fields', []) !== [];
+    }
+
+    /**
+     * Strip operator-designated "safe" fields from an input bag before it is
+     * scanned. Field names are matched against each value's dot-notation path
+     * with `*` wildcards, and a bare name (`content`) also excludes everything
+     * nested beneath it (`content.*`).
+     *
+     * @param  array<string, mixed>  $data
+     * @return array<string, mixed>
+     */
+    private function withoutSafeFields(array $data): array
+    {
+        $safe = (array) config('waf.safe_fields', []);
+
+        if ($safe === [] || $data === []) {
+            return $data;
+        }
+
+        $result = [];
+
+        foreach (Arr::dot($data) as $path => $value) {
+            $path = (string) $path;
+
+            $excluded = false;
+            foreach ($safe as $pattern) {
+                $pattern = (string) $pattern;
+                if (Str::is($pattern, $path) || str_starts_with($path, $pattern.'.')) {
+                    $excluded = true;
+
+                    break;
+                }
+            }
+
+            if (! $excluded) {
+                Arr::set($result, $path, $value);
+            }
+        }
+
+        return $result;
     }
 
     /**
@@ -268,7 +328,13 @@ class WafInspector
 
     private function stringify(array $data): string
     {
-        return $data === [] ? '' : $this->normalise((string) json_encode($data, JSON_UNESCAPED_SLASHES));
+        // Without the substitute flag, one invalid UTF-8 byte in any field makes
+        // json_encode return false and the whole parsed surface vanishes — on a
+        // multipart request (no raw body available) that would blind the WAF to
+        // the entire body.
+        return $data === [] ? '' : $this->normalise(
+            (string) json_encode($data, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE)
+        );
     }
 
     /**
@@ -278,7 +344,11 @@ class WafInspector
      *
      *   1. percent-decoding (twice, to unwrap double URL-encoding)
      *   2. HTML-entity decoding (e.g. `&lt;script&gt;` → `<script>`)
-     *   3. null-byte stripping (e.g. `<scr%00ipt>` → `<script>`)
+     *   3. IIS `%uXXXX` decoding (e.g. `%u003cscript%u003e` → `<script>`)
+     *   4. backslash escape decoding (JS/JSON-style \uXXXX and \xXX → char)
+     *   5. null-byte stripping (e.g. `<scr%00ipt>` → `<script>`)
+     *   6. SQL-comment stripping (an inline block comment between UNION and
+     *      SELECT is folded to a space, so the pair reads as `UNION SELECT`)
      */
     private function normalise(string $raw): string
     {
@@ -300,12 +370,101 @@ class WafInspector
             $variants[] = $html;
         }
 
-        $denulled = str_replace("\0", '', $html);
-        if ($denulled !== $html) {
+        $unicode = $this->decodeIisUnicode($html);
+        if ($unicode !== $html) {
+            $variants[] = $unicode;
+        }
+
+        $escaped = $this->decodeBackslashEscapes($unicode);
+        if ($escaped !== $unicode) {
+            $variants[] = $escaped;
+        }
+
+        $denulled = str_replace("\0", '', $escaped);
+        if ($denulled !== $escaped) {
             $variants[] = $denulled;
         }
 
+        $decommented = $this->stripSqlComments($denulled);
+        if ($decommented !== $denulled) {
+            $variants[] = $decommented;
+        }
+
         return implode("\n", array_unique($variants));
+    }
+
+    /**
+     * Produce a view with SQL comments folded away, so inline-comment evasion
+     * (a block comment wedged between UNION and SELECT, or a MySQL executable
+     * comment) reads as ordinary SQL and trips the keyword rules even at
+     * paranoia level 1 — where the broad comment-sequence rule (942170) is off.
+     *
+     * The comment bodies are length-bounded so a comment-open flood stays linear.
+     */
+    private function stripSqlComments(string $value): string
+    {
+        if (! str_contains($value, '/*') && ! str_contains($value, '--') && ! str_contains($value, '#')) {
+            return $value;
+        }
+
+        // MySQL executable comments run their contents, so keep the inner SQL
+        // and drop only the wrapper: `/*!50000UNION*/` becomes ` UNION `.
+        $value = (string) preg_replace('#/\*!(?:\d{5})?(.{0,2000}?)\*/#s', ' $1 ', $value);
+
+        // An ordinary block comment is a token separator: collapse it to a
+        // single space so `UNION/**/SELECT` reads as `UNION SELECT`.
+        $value = (string) preg_replace('#/\*.{0,2000}?\*/#s', ' ', $value);
+
+        // Line comments (`-- `, `#`) run to the end of the line.
+        $value = (string) preg_replace('/(?:--\s|\#)[^\n]*/', ' ', $value);
+
+        return $value;
+    }
+
+    /**
+     * Decode Microsoft IIS `%uXXXX` escapes (e.g. `%u003c` → `<`), a classic
+     * WAF-evasion encoding that ordinary percent-decoding leaves untouched.
+     * The callback is linear over a capped surface, so it can't go quadratic.
+     */
+    private function decodeIisUnicode(string $value): string
+    {
+        if (stripos($value, '%u') === false) {
+            return $value;
+        }
+
+        return (string) preg_replace_callback(
+            '/%u([0-9a-fA-F]{4})/',
+            static fn (array $m): string => (string) mb_convert_encoding(
+                pack('n', (int) hexdec($m[1])), 'UTF-8', 'UTF-16BE'
+            ),
+            $value,
+        );
+    }
+
+    /**
+     * Decode JS/JSON-style backslash escapes — `\uXXXX` and `\xXX` — so a
+     * payload hidden as `<script>` is unmasked. Ordinary percent- and
+     * entity-decoding leaves these untouched. Linear over a capped surface.
+     */
+    private function decodeBackslashEscapes(string $value): string
+    {
+        if (! str_contains($value, '\\')) {
+            return $value;
+        }
+
+        $value = (string) preg_replace_callback(
+            '/\\\\u([0-9a-fA-F]{4})/',
+            static fn (array $m): string => (string) mb_convert_encoding(
+                pack('n', (int) hexdec($m[1])), 'UTF-8', 'UTF-16BE'
+            ),
+            $value,
+        );
+
+        return (string) preg_replace_callback(
+            '/\\\\x([0-9a-fA-F]{2})/',
+            static fn (array $m): string => chr((int) hexdec($m[1])),
+            $value,
+        );
     }
 
     /**
@@ -475,9 +634,14 @@ class WafInspector
 
         $id = $this->persist($row);
 
-        // Remember the row id (inline path only) so later duplicates within the
-        // window can bump its hit counter instead of being dropped silently.
-        if ($id !== null) {
+        if ($id === false) {
+            // The write failed, so release the dedup slot — otherwise the
+            // finding stays suppressed for the whole window with nothing
+            // stored, and the attack disappears from the log entirely.
+            Cache::forget($seenKey);
+        } elseif ($id !== null) {
+            // Remember the row id (inline path only) so later duplicates within
+            // the window can bump its hit counter instead of being dropped.
             Cache::put($seenKey, $id, $window);
         }
 
@@ -558,9 +722,10 @@ class WafInspector
 
     /**
      * @param  array<string, mixed>  $row
-     * @return int|null the inserted row id (inline path), or null when queued
+     * @return int|false|null the inserted row id (inline path), null when
+     *                        queued, or false when the inline write failed
      */
-    private function persist(array $row): ?int
+    private function persist(array $row): int|false|null
     {
         if (config('waf.queue.enabled', false)) {
             StoreWafLog::dispatch($row)
@@ -575,7 +740,7 @@ class WafInspector
         } catch (\Throwable $e) {
             Log::error('laravel-waf: could not persist finding', ['error' => $e->getMessage()]);
 
-            return null;
+            return false;
         }
     }
 

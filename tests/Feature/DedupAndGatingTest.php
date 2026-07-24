@@ -1,6 +1,7 @@
 <?php
 
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Tuijncode\LaravelWaf\Services\CorrelationAnalyzer;
 
 it('logs a repeated identical threat only once within the dedup window', function () {
@@ -73,6 +74,23 @@ it('does not tally duplicates under queueing (hit_count stays 1)', function () {
     // aren't counted — one row, hit_count 1.
     $log = DB::table('waf_logs')->sole();
     expect((int) $log->hit_count)->toBe(1);
+});
+
+it('releases the dedup slot when the log write fails, so the finding is not lost', function () {
+    $q = '/?q='.rawurlencode("' UNION SELECT * FROM users--");
+
+    // Break the log table so the first write fails silently (the WAF never
+    // takes the application down over a storage error) ...
+    Schema::rename('waf_logs', 'waf_logs_broken');
+    $this->get($q)->assertOk();
+
+    // ... then restore it. The retry within the dedup window must be stored:
+    // a slot claimed by a failed write would suppress the finding for the
+    // whole window with nothing in the log.
+    Schema::rename('waf_logs_broken', 'waf_logs');
+    $this->get($q)->assertOk();
+
+    expect(DB::table('waf_logs')->count())->toBe(1);
 });
 
 it('logs distinct threats separately', function () {
