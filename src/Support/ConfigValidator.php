@@ -49,8 +49,29 @@ class ConfigValidator
         $this->environments($problems);
         $this->knownCategories($problems);
         $this->customPatterns($problems);
+        $this->safeFields($problems);
 
         return $problems;
+    }
+
+    /**
+     * @param  array<int, string>  $problems
+     */
+    private function safeFields(array &$problems): void
+    {
+        $safe = config('waf.safe_fields', []);
+
+        if (! is_array($safe)) {
+            $problems[] = 'waf.safe_fields must be an array of field names, got '.$this->show($safe).'.';
+
+            return;
+        }
+
+        foreach ($safe as $field) {
+            if (! is_string($field)) {
+                $problems[] = 'waf.safe_fields entries must be strings, got '.$this->show($field).'.';
+            }
+        }
     }
 
     /**

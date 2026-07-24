@@ -11,11 +11,13 @@ and logs — or blocks — anything that looks like an attack.
 
 ## Features
 
-- **30+ detection patterns** — SQL injection, XSS, RCE, directory traversal / LFI,
-  RFI, SSRF, XXE, Log4Shell, NoSQL injection, PHP injection and command injection,
+- **40+ detection patterns** — SQL injection, XSS, RCE (including Shellshock and
+  Windows command execution), directory traversal / LFI, RFI, SSRF, XXE, Log4Shell,
+  NoSQL injection, PHP injection, command injection and LDAP / XPath injection,
   organised by OWASP CRS rule id and category.
 - **Scanner detection** — SQLMap, Nikto, Nmap, Burp Suite, Acunetix, WPScan,
-  Nessus, Nuclei, Metasploit and more, by their User-Agent fingerprint.
+  Nessus, Nuclei, Metasploit, Arachni, Wapiti, Commix, ffuf, feroxbuster and more,
+  by their User-Agent fingerprint.
 - **Bot detection** — scripting libraries, headless browsers and empty/spoofed
   user agents.
 - **DDoS monitoring** — rate-based threshold detection over a configurable window.
@@ -24,17 +26,27 @@ and logs — or blocks — anything that looks like an attack.
   request.
 - **Confidence scoring** — every threat gets a 0-100 score derived from the CRS
   anomaly score plus contextual signals (breadth, request location, scanner/bot/DoS).
-- **Evasion-resistant** — surfaces are URL-decoded (twice), HTML-entity decoded
-  and null-byte stripped before matching; oversized payloads are sampled head +
-  tail so padding can't push an attack out of view, and the client names of
-  uploaded files are inspected too.
+- **Evasion-resistant** — surfaces are URL-decoded (twice), HTML-entity decoded,
+  IIS `%uXXXX`- and backslash-escape (`\uXXXX` / `\xXX`) decoded, null-byte
+  stripped and SQL-comment folded before matching (so `UNION/**/SELECT` is caught
+  even at paranoia 1); oversized payloads are sampled head + tail so padding can't
+  push an attack out of view, and the client names of uploaded files are inspected
+  too.
 - **Secret redaction** — captured API keys, passwords and card numbers are masked
   before they reach `waf_logs`.
 - **`waf_logs` storage** — detected threats are persisted for auditing.
 - **`ThreatDetected` event** — hook in your own response (block, ban, notify, SIEM).
 - **Exclusion rules** — suppress known false positives by rule id / label and path.
+- **Field-level exclusions** — mark rich-text / free-form fields as `safe_fields`
+  to silence false positives without disabling a whole rule (dot-notation +
+  wildcards).
+- **IP allow & deny lists** — a CIDR-aware allowlist that skips inspection, and a
+  denylist that refuses matching IPs up front in any mode.
 - **Correlation analytics** — detect coordinated / distributed campaigns across
   many IPs from the logs (`waf:correlate`).
+- **Operator tooling** — dry-run a payload (`waf:test`) and export offending IPs as
+  a fail2ban / nginx / Apache / CSV blocklist (`waf:export`), alongside stats,
+  purge and unban commands.
 - **Config validation** — misconfiguration is surfaced as a log warning at boot.
 - **Queue support** — defer logging off the request cycle.
 - **Retention** — prune old logs manually or on a daily schedule.
@@ -63,6 +75,10 @@ upgrade migration (idempotent, safe to run once) and migrate:
 php artisan vendor:publish --tag=waf-migrations-upgrade
 php artisan migrate
 ```
+
+1.2 adds only new config options (`blocklisted_ips`, `safe_fields`) and commands
+— no migration is required. Re-publish the config to pick up the new keys, or add
+them by hand.
 
 `waf-config` publishes both config files at once. To publish them separately:
 
@@ -128,24 +144,26 @@ exist yet at dispatch time.
 
 Key options in `config/waf.php`:
 
-| Option                 | Default     | Description                                                |
-|------------------------|-------------|------------------------------------------------------------|
-| `mode`                 | `detection` | `detection` (log only) or `blocking`.                      |
-| `on_error`             | `open`      | Fail `open` (let through) or `closed` (503) on error.      |
-| `min_confidence`       | `10`        | Threats below this 0-100 score are ignored.                |
-| `block_confidence`     | `60`        | In blocking mode, refuse requests at/above this score.     |
-| `paranoia_level`       | `2`         | `1` = high-confidence rules only; `2` adds broader rules.  |
-| `disabled_rules`       | `[]`        | Rule ids to silence, e.g. `['930100']`.                    |
-| `disabled_categories`  | `[]`        | Categories to silence, e.g. `['nosqli']`.                  |
-| `skip_paths`           | assets, …   | Wildcard paths excluded from inspection.                   |
-| `only_paths`           | `[]`        | If set, ONLY these paths are inspected.                    |
-| `whitelisted_ips`      | `[]`        | CIDR-aware IP allowlist.                                    |
-| `whitelisted_agents`   | `[]`        | User-Agent substrings exempt from bot detection.           |
-| `dedup_include_path`   | `false`     | Add the path to the dedup key (one finding per path).      |
-| `dedup_flush_seconds`  | `10`        | Coalesce `hit_count` writes; `0` writes every bump through. |
-| `ddos.threshold`       | `300`       | Requests per `ddos.window` seconds before a DoS flag.      |
-| `ddos.block`           | `false`     | In blocking mode, refuse floods on the volumetric signal.  |
-| `auto_ban.enabled`     | `false`     | Temporarily ban an IP after repeated blocks (blocking mode). |
+| Option                | Default     | Description                                                  |
+|-----------------------|-------------|--------------------------------------------------------------|
+| `mode`                | `detection` | `detection` (log only) or `blocking`.                        |
+| `on_error`            | `open`      | Fail `open` (let through) or `closed` (503) on error.        |
+| `min_confidence`      | `10`        | Threats below this 0-100 score are ignored.                  |
+| `block_confidence`    | `60`        | In blocking mode, refuse requests at/above this score.       |
+| `paranoia_level`      | `2`         | `1` = high-confidence rules only; `2` adds broader rules.    |
+| `disabled_rules`      | `[]`        | Rule ids to silence, e.g. `['930100']`.                      |
+| `disabled_categories` | `[]`        | Categories to silence, e.g. `['nosqli']`.                    |
+| `skip_paths`          | assets, …   | Wildcard paths excluded from inspection.                     |
+| `only_paths`          | `[]`        | If set, ONLY these paths are inspected.                      |
+| `safe_fields`         | `[]`        | Input fields excluded from scanning (dot-notation, `*`).     |
+| `whitelisted_ips`     | `[]`        | CIDR-aware IP allowlist (skips inspection).                  |
+| `blocklisted_ips`     | `[]`        | CIDR-aware IP denylist (refused up front, any mode).         |
+| `whitelisted_agents`  | `[]`        | User-Agent substrings exempt from bot detection.             |
+| `dedup_include_path`  | `false`     | Add the path to the dedup key (one finding per path).        |
+| `dedup_flush_seconds` | `10`        | Coalesce `hit_count` writes; `0` writes every bump through.  |
+| `ddos.threshold`      | `300`       | Requests per `ddos.window` seconds before a DoS flag.        |
+| `ddos.block`          | `false`     | In blocking mode, refuse floods on the volumetric signal.    |
+| `auto_ban.enabled`    | `false`     | Temporarily ban an IP after repeated blocks (blocking mode). |
 
 > DDoS monitoring is built on Laravel's rate limiter, so it works with any
 > configured cache store. Only inspected requests count towards the budget:
@@ -155,6 +173,20 @@ Key options in `config/waf.php`:
 > mode it is logged but not refused unless you set `ddos.block` (or
 > `WAF_DDOS_BLOCK=true`). It is then refused on the flood signal alone, with a
 > `Retry-After` header.
+
+### IP allow & deny lists
+
+Two CIDR-aware lists short-circuit inspection at the edge, both accepting a
+comma-separated env value (e.g. `WAF_BLOCKLISTED_IPS="203.0.113.4,10.0.0.0/8"`):
+
+- **`whitelisted_ips`** (`WAF_WHITELISTED_IPS`) — trusted addresses skip
+  inspection entirely.
+- **`blocklisted_ips`** (`WAF_BLOCKLISTED_IPS`) — known-bad addresses are refused
+  up front with the block response, before any inspection, on every path and in
+  either mode. It is an explicit operator decision independent of the scoring
+  engine, so it blocks **even in `detection` mode**.
+
+If an address is on both lists the allowlist wins.
 
 ### Blocking & the block response
 
@@ -209,9 +241,11 @@ refuse requests with a `503` instead.
 
 ### Tuning out false positives
 
-Three levers, cheapest first:
+Four levers, cheapest first:
 
 - **`paranoia_level`** — drop to `1` to run only the highest-confidence rules.
+- **`safe_fields`** — exclude specific rich-text / free-form fields from scanning
+  (below), the surgical fix for a field that legitimately carries markup or code.
 - **`disabled_rules` / `disabled_categories`** — silence a specific noisy rule
   or a whole category pre-emptively.
 - **Exclusion rules** — accept a specific finding on a specific path (below).
@@ -239,6 +273,26 @@ silently suppress entire rule families.
 
 Excluded threats are still written to `waf_logs` with `action_taken = 'excluded'`
 (for auditing) but are never blocked.
+
+### Safe fields
+
+Some fields legitimately carry markup or code — a CMS body, a WYSIWYG editor, a
+code-snippet field — and scanning them is pure noise. List them under
+`safe_fields` to skip them, matched against each value's dot-notation path with
+`*` wildcards:
+
+```php
+'safe_fields' => [
+    'content',        // the "content" field and anything nested under it
+    'post.body',      // a nested field
+    'blocks.*.html',  // the "html" key of every entry in "blocks"
+],
+```
+
+When `safe_fields` is non-empty the raw request body / query string is no longer
+scanned wholesale (that would smuggle a safe field's value straight back in); the
+parsed input, minus the safe fields, is scanned instead. Unstructured bodies
+(raw XML / text, which have no named fields to protect) are still scanned in full.
 
 ### Custom patterns
 
@@ -329,14 +383,49 @@ count if you'd rather trade the write.
 ### Console commands
 
 ```bash
-php artisan waf:stats --days=7    # summary: counts by category / severity / IP
-php artisan waf:correlate         # surface coordinated / distributed attacks
-php artisan waf:purge --days=90   # delete findings older than N days
-php artisan waf:unban 203.0.113.9 # lift a standing auto-ban for an IP
+php artisan waf:stats --days=7        # summary: counts by category / severity / IP
+php artisan waf:correlate             # surface coordinated / distributed attacks
+php artisan waf:purge --days=90       # delete findings older than N days
+php artisan waf:unban 203.0.113.9     # lift a standing auto-ban for an IP
+php artisan waf:test "payload"        # dry-run a payload and see what it trips
+php artisan waf:export --format=nginx # export offending IPs as a blocklist
 ```
 
 Set `WAF_RETENTION=true` (and `WAF_RETENTION_DAYS`) to run the purge
 automatically every day at 02:00 via Laravel's scheduler.
+
+#### Dry-running a payload (`waf:test`)
+
+Reproduce a false positive or check a rule without sending a live request:
+
+```bash
+php artisan waf:test "' UNION SELECT * FROM users--"
+php artisan waf:test --path=/search --query="q=<script>alert(1)</script>"
+php artisan waf:test "payload" --ua="sqlmap/1.7" --header="X-Forwarded-For: 1.2.3.4"
+```
+
+It prints the signatures that matched (rule id, category, severity, surface and
+the matched substring), any scanner / bot / flood signals, and the confidence
+score with whether the request would block at your current threshold. It runs
+the read-only inspection path — nothing is logged, counted or blocked.
+
+#### Exporting a blocklist (`waf:export`)
+
+Turn recorded findings into an edge blocklist for fail2ban, nginx, Apache, or a
+spreadsheet:
+
+```bash
+php artisan waf:export                                  # plain IP list (stdout)
+php artisan waf:export --format=nginx > /etc/nginx/waf-deny.conf
+php artisan waf:export --format=csv --min-level=critical --days=7 --min-hits=5
+```
+
+Offending IPs are grouped and ordered by total hit volume. Filter with
+`--min-level` (severity floor, default `error`), `--days` (recent window),
+`--min-hits` and `--limit`. Formats: `plain` (one IP per line — also suits a
+fail2ban blocklist), `nginx` (`deny <ip>;`), `apache` (`Require not ip <ip>`)
+and `csv`. Data goes to stdout for redirection; the export count and any notices
+go to stderr, keeping the piped output clean.
 
 ### Querying findings
 

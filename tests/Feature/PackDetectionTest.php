@@ -18,6 +18,7 @@ it('detects bundled pack signatures end to end', function (string $query, string
     'Open redirect' => ['next=//evil.example', 'Open Redirect'],
     'Prototype pollution' => ['__proto__[admin]=1', 'Prototype Pollution'],
     'GraphQL introspection' => ['q='.rawurlencode('{__schema{types{name}}}'), 'GraphQL Introspection'],
+    'Java deserialization (hex magic)' => ['data=aced0005737200046a617661', 'Java Deserialization Payload (hex)'],
     // Regression: `$`-anchored patterns must also match a value at the end of a
     // query parameter, not only at the end of the whole inspected surface.
     '.env probe via query' => ['file=.env', 'Environment File Access'],

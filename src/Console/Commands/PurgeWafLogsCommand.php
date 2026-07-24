@@ -3,7 +3,6 @@
 namespace Tuijncode\LaravelWaf\Console\Commands;
 
 use Illuminate\Console\Command;
-use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
@@ -19,8 +18,7 @@ class PurgeWafLogsCommand extends Command
         $horizon = now()->subDays($days);
         $table = config('waf.table_name', 'waf_logs');
 
-        $stale = DB::table($table)->where('created_at', '<', $horizon);
-        $total = $stale->count();
+        $total = DB::table($table)->where('created_at', '<', $horizon)->count();
 
         if ($total === 0) {
             $this->line("Nothing to prune — no findings predate {$days} day(s) ago.");
@@ -37,29 +35,33 @@ class PurgeWafLogsCommand extends Command
             return self::SUCCESS;
         }
 
-        $doomed = $stale->pluck('id');
-        $this->cascadeExclusions($doomed);
+        // Clear the dependent exclusion rules first, then the findings — both
+        // keyed off a DB-side subquery so a large purge never materialises
+        // millions of ids in PHP memory.
+        $this->cascadeExclusions($table, $horizon);
 
-        DB::table($table)->whereIn('id', $doomed)->delete();
+        $deleted = DB::table($table)->where('created_at', '<', $horizon)->delete();
 
-        $this->info("Pruned {$total} finding(s).");
+        $this->info("Pruned {$deleted} finding(s).");
 
         return self::SUCCESS;
     }
 
     /**
-     * Tidy up exclusion rules that referenced findings we are about to remove.
-     *
-     * @param  Collection<int, int>  $logIds
+     * Remove exclusion rules that referenced findings this purge is deleting,
+     * selecting the doomed ids with a subquery rather than loading them.
      */
-    private function cascadeExclusions(Collection $logIds): void
+    private function cascadeExclusions(string $table, \DateTimeInterface $horizon): void
     {
-        if ($logIds->isEmpty() || ! Schema::hasTable('waf_exclusion_rules')) {
+        if (! Schema::hasTable('waf_exclusion_rules')) {
             return;
         }
 
         $gone = DB::table('waf_exclusion_rules')
-            ->whereIn('source_log_id', $logIds)
+            ->whereIn('source_log_id', fn ($query) => $query
+                ->select('id')
+                ->from($table)
+                ->where('created_at', '<', $horizon))
             ->delete();
 
         if ($gone > 0) {
